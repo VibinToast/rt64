@@ -114,9 +114,9 @@ namespace RT64 {
             // at the origin and an extra row is left at the end to account for filtering.
             // We add two extra rows to whatever result we get and try to get the closest clean
             // multiplier of the specified Division factor.
-            const uint32_t ExtraRows = 2;
+            uint32_t extraRows = width > 320 ? 4 : 2;
             const uint32_t Divisor = 4;
-            size.y += ExtraRows;
+            size.y += extraRows;
             size.y = lround(float(size.y) / Divisor) * Divisor;
             return size;
         } else {
