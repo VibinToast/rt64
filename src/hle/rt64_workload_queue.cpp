@@ -1148,7 +1148,25 @@ namespace RT64 {
                 }
 
                 ext.sharedResources->viOriginalRate = workload.viOriginalRate;
-                
+                {
+                    // JFG PORT: debug aid. RT64_INTERP_TRACE=1 counts, once a second, the game rates the workloads came with
+                    // and how many got in-between frames.
+                    static const bool rateTrace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+                    static uint32_t rate60 = 0, rate30 = 0, rate0 = 0, rateOther = 0, interpolated = 0, offscreen = 0, count = 0;
+                    if (rateTrace) {
+                        if (jfgOffscreen) offscreen++;
+                        else if (workload.viOriginalRate == 60) rate60++;
+                        else if (workload.viOriginalRate == 30) rate30++;
+                        else if (workload.viOriginalRate == 0) rate0++;
+                        else rateOther++;
+                        interpolated += generateInterpolatedFrames ? 1 : 0;
+                        if ((++count % 120) == 0) {
+                            fprintf(stderr, "[INTERP] workload rates: 60 %u, 30 %u, 0 (mixed) %u, other %u, off-screen %u; with in-between frames %u\n", rate60, rate30, rate0, rateOther, offscreen, interpolated);
+                            rate60 = rate30 = rate0 = rateOther = interpolated = offscreen = 0;
+                        }
+                    }
+                }
+
                 // Get the current and previous set of frame counters. The other set can be in use by the present queue. Skip if no new present event has arrived before this workload event.
                 // JFG PORT: an off-screen workload gets counters of its own: the shared ones belong to the screen frames (taking
                 // them would let the next screen frame draw over interpolated frames that are still being presented).
