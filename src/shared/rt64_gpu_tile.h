@@ -18,6 +18,7 @@ namespace interop {
             uint rawTMEM : 1;
             uint hasMipmaps : 1;
             uint shiftedByHalf : 1;
+            uint jfgSoft : 1; // JFG PORT: a copy of a small framebuffer, sampled with a soft edge (TextureSampler.hlsli)
         };
 
         uint value;
@@ -48,6 +49,10 @@ namespace interop {
 
     bool gpuTileFlagShiftedByHalf(GPUTileFlags flags) {
         return flags & 0x20;
+    }
+
+    bool gpuTileFlagJfgSoft(GPUTileFlags flags) {
+        return flags & 0x40;
     }
 #endif
     struct GPUTile {

@@ -16,10 +16,33 @@ namespace RT64 {
     // VI
     
     hlslpp::float4 VI::viewRectangle() const {
+        // JFG PORT: honour the VI's vertical display window. Jet Force Gemini letterboxes its cutscenes by
+        // switching to a VI mode that shows the full 240-line framebuffer in 180 scanlines (V_START moved in
+        // by 30 lines at both ends, Y_SCALE raised to match; src/gameVi.c viSetTiming). Presenting that
+        // framebuffer at full height makes the picture look horizontally squeezed. Only a window that is
+        // vertically smaller than the standard NTSC one (half-lines 37..511) is treated this way.
+        const float StdVStart = 37.0f, StdVSpan = 474.0f;
+        const float vSpan = float(vRegion.vEnd) - float(vRegion.vStart);
+        if ((hRegion.hStart > 0) && (vSpan > StdVSpan * 0.5f) && (vSpan < StdVSpan - 8.0f) && (yTransform.yScale > 1024)) {
+            const float top = std::clamp((float(vRegion.vStart) - StdVStart) / StdVSpan, 0.0f, 0.5f);
+            const float height = std::clamp(vSpan / StdVSpan, 0.5f, 1.0f - top);
+            return { 0.0f, top, 1.0f, height };
+        }
+
         return { 0.0f, 0.0f, 1.0f, 1.0f };
     }
 
     hlslpp::float4 VI::cropRectangle() const {
+        // JFG PORT: the game's scissor is (0,0)-(319,239), so the last framebuffer column and row are never
+        // drawn and hold stale data (a bright line at the right and bottom edges, most visible on the title
+        // screen). A TV hides them in overscan; crop that one native pixel here.
+        const hlslpp::uint2 size = fbSize();
+        const uint32_t w = size.x, h = size.y;
+        if ((w > 1) && (h > 1)) {
+            // 1.5 pixels: the presentation filter would otherwise blend half of the stale line back in.
+            return { 0.0f, 0.0f, (float(w) - 1.5f) / float(w), (float(h) - 1.5f) / float(h) };
+        }
+
         return { 0.0f, 0.0f, 1.0f, 1.0f };
     }
 

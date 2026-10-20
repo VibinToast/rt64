@@ -96,6 +96,7 @@ namespace RT64 {
             bool readDepthFromStorage = false;
             bool needsDiscard = false;
             bool ignore = false;
+            bool jfgSmallSource = false; // JFG PORT: copied from a framebuffer 128 pixels wide or less (render to texture)
             std::unique_ptr<RenderFramebuffer> framebuffer;
         };
 

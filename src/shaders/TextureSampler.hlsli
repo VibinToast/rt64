@@ -238,7 +238,21 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
     
     const bool flagShiftedByHalf = gpuTileFlagShiftedByHalf(gpuTile.flags);
     if (flagShiftedByHalf) {
-        uvCoord += float2(0.5f, 0.5f);
+        // JFG PORT: a point-sampled rectangle (HUD digits, text) with a replacement is sampled at vertexUV, which runs
+        // continuously from uls/ult at the rectangle's edge (original textures use lowResUV, already right). The N64 shows
+        // texel uls + i * step whole in pixel i, so on a forward axis pixel i covers [uls + i, uls + i + 1): no shift. On an
+        // axis drawn backwards (negative dsdx / dtdy, which ddx / ddy show; with flip the axes trade places) it covers
+        // (ult - i, ult - i + 1], one texel above vertexUV. The half texel was wrong both ways: on a forward axis the
+        // replacement sat half a texel left and showed half a texel of the next digit in the strip; on a backward one the
+        // last row was drawn a whole texel tall and the first half a texel. Triangles and filtered draws keep the half.
+        const bool jfgPointRect = renderFlagRect(renderFlags) && (otherMode.textFilt() == G_TF_POINT) && !renderFlagLinearFiltering(renderFlags);
+        if (jfgPointRect) {
+            const float2 jfgStep = ddxUV + ddyUV;
+            uvCoord += float2((jfgStep.x < 0.0f) ? 1.0f : 0.0f, (jfgStep.y < 0.0f) ? 1.0f : 0.0f);
+        }
+        else {
+            uvCoord += float2(0.5f, 0.5f);
+        }
     }
     
     uvCoord *= gpuTile.tcScale;
@@ -335,6 +349,23 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
         textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR);
     }
 #endif
+
+    // JFG PORT: a picture the game rendered into a small framebuffer (Jet Force Gemini's character shadows, 64x64) is drawn from
+    // RT64's high-resolution copy of it, with a hard outline; on the N64 it was magnified from 64x64 and had a soft edge.
+    // Averaged over a 3x3 grid of bilinear samples 0.6 of an original texel apart, it gets a soft edge again, without steps.
+    if (gpuTileFlagJfgSoft(gpuTile.flags) && !flagHasMipmaps) {
+        const float2 jfgOffset = gpuTile.tcScale * 0.6f;
+        float4 jfgSum = sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(-jfgOffset.x, -jfgOffset.y), tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(0.0f, -jfgOffset.y), tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(jfgOffset.x, -jfgOffset.y), tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(-jfgOffset.x, 0.0f), tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord, tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(jfgOffset.x, 0.0f), tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(-jfgOffset.x, jfgOffset.y), tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(0.0f, jfgOffset.y), tlut, canDecodeTMEM, 0, usesHDR);
+        jfgSum += sampleTextureLevel(rdpTile, gpuTile, true, false, true, uvCoord + float2(jfgOffset.x, jfgOffset.y), tlut, canDecodeTMEM, 0, usesHDR);
+        textureSamples[0] = jfgSum / 9.0f;
+    }
 
     // Compute the result from the RDP samples.
     float4 textureColor;
