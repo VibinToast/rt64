@@ -3,6 +3,9 @@
 //
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include "rt64_present_queue.h"
 
 #include "common/rt64_thread.h"
@@ -407,6 +410,18 @@ namespace RT64 {
                 presentTimestamp = Timer::current();
                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
                 rt64_jfg_present_count.fetch_add(1, std::memory_order_relaxed); // JFG PORT: for the port's FPS display
+                {
+                    // JFG PORT: debug aid. RT64_INTERP_TRACE=1 logs every gap of more than 50 ms between two presents.
+                    static const bool hitchTrace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+                    static std::chrono::steady_clock::time_point lastPresent;
+                    const auto now = std::chrono::steady_clock::now();
+                    const double gapMs = std::chrono::duration<double, std::milli>(now - lastPresent).count();
+                    if (hitchTrace && (lastPresent != std::chrono::steady_clock::time_point{}) && (gapMs > 50.0)) {
+                        fprintf(stderr, "[HITCH] %.0f ms between presents\n", gapMs);
+                    }
+
+                    lastPresent = now;
+                }
                 presentProfiler.logAndRestart();
             }
         }
