@@ -274,6 +274,7 @@ namespace RT64 {
     }
 
     void RDP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
+        if (const char *t = std::getenv("RT64_VI_TRACE"); t != nullptr && t[0] == '2') fprintf(stderr, "[CIMG] %06X w=%u\n", address & 0xFFFFFF, width);
         // Make sure the new color image is actually different. Some games will set the color image
         // multiple times despite setting the exact same parameters.
         const uint32_t newAddress = maskAddress(address);
@@ -1289,6 +1290,8 @@ namespace RT64 {
         drawCall.rect = drawRect;
         drawCall.rectDsdx = dsdx;
         drawCall.rectDtdy = dtdy;
+        drawCall.rectS = uls; // JFG PORT
+        drawCall.rectT = ult;
         drawCall.rectLeftOrigin = extAlignment.leftOrigin;
         drawCall.rectRightOrigin = extAlignment.rightOrigin;
         drawCall.rectAspect = extended.global.rectAspect;

@@ -77,6 +77,8 @@ namespace RT64 {
         FixedRect rect;
         int16_t rectDsdx;
         int16_t rectDtdy;
+        int16_t rectS; // JFG PORT: the texture rectangle's S and T (s10.5), for the texture dump's draw_trace.txt
+        int16_t rectT;
         uint16_t rectLeftOrigin;
         uint16_t rectRightOrigin;
         FixedRect scissorRect;

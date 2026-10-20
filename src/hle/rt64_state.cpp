@@ -6,6 +6,10 @@
 
 #include <cassert>
 #include <cinttypes>
+#include <cstdio>
+#include <deque>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "im3d/im3d.h"
 #include "im3d/im3d_math.h"
@@ -27,6 +31,10 @@
 #define MI_INTR_DP          0x00000020
 #define MI_INTR_SP          0x00000001
 
+// JFG PORT: the latest screen update's framebuffer and the number of screen updates (see State::updateScreen).
+std::atomic<uint32_t> rt64_jfg_screen_fb{ 0 };
+std::atomic<uint32_t> rt64_jfg_screen_updates{ 0 };
+
 namespace RT64 {
     const float ShiftScaleMap[] = {
         1.0f,
@@ -45,6 +53,132 @@ namespace RT64 {
         8.0f,
         4.0f,
         2.0f
+    };
+
+    // JFG PORT: draw_trace.txt without repeats. Rectangles are logged every frame, so a menu or the credits held for
+    // minutes wrote the same lines 60 times a second (1.1 GB for the whole game). Each frame's lines are held, and its
+    // rectangle lines are written only if no earlier frame drew the same ones: compared without the frame number, with
+    // each call number as the step from the line before (the 3D draws before the HUD vary in number; Toasty_Upscaler
+    // reads only how calls relate) and with the scene tag. Triangle lines are always written, and so are the last
+    // TraceSettleFrames frames before the scene tag changes (Toasty's SCENE_SETTLE). The same rule as Toasty's
+    // compact-trace, see "Frames without repeats" in its RT64_INTEGRATION.md. The last few frames of a session are
+    // still held when the game closes and are not written.
+    struct TraceCompactor {
+        static constexpr size_t TraceSettleFrames = 3;
+
+        struct Line {
+            uint32_t fb;
+            uint32_t call;
+            bool rect;
+            std::string rest; // the line after "call N": " rect ..." or " tris ...", up to and with "\n"
+        };
+
+        struct Frame {
+            uint64_t number = 0;
+            std::string scene;
+            std::vector<Line> lines;
+            bool whole = false;
+        };
+
+        std::deque<Frame> pending;
+        Frame current;
+        bool hasCurrent = false;
+        std::string lastScene;
+        std::unordered_set<uint64_t> seen;
+
+        void add(FILE *file, uint64_t frame, uint32_t fb, uint32_t call, bool rect, std::string rest, const std::string &scene) {
+            if (hasCurrent && (current.number != frame)) {
+                endFrame(file);
+            }
+
+            if (!hasCurrent) {
+                current = Frame();
+                current.number = frame;
+                current.scene = scene;
+                hasCurrent = true;
+            }
+
+            current.lines.push_back({ fb, call, rect, std::move(rest) });
+        }
+
+        // Writes everything held, then starts over (a new file).
+        void flush(FILE *file) {
+            endFrame(file);
+            while (!pending.empty()) {
+                writeFirst(file);
+            }
+
+            seen.clear();
+            lastScene.clear();
+        }
+
+    private:
+        void endFrame(FILE *file) {
+            if (!hasCurrent) {
+                return;
+            }
+
+            if (current.scene != lastScene) {
+                for (Frame &f : pending) {
+                    f.whole = true;
+                }
+
+                lastScene = current.scene;
+            }
+
+            pending.push_back(std::move(current));
+            hasCurrent = false;
+            while (pending.size() > TraceSettleFrames) {
+                writeFirst(file);
+            }
+        }
+
+        void writeFirst(FILE *file) {
+            Frame f = std::move(pending.front());
+            pending.pop_front();
+            bool skipRects = false;
+            if (!f.whole) {
+                std::vector<const Line *> rects;
+                for (const Line &l : f.lines) {
+                    if (l.rect) {
+                        rects.push_back(&l);
+                    }
+                }
+
+                if (!rects.empty()) {
+                    // Calls go up within a frame, so a step over 1 means the same as any other; if they ever go back,
+                    // the exact steps are compared.
+                    bool backwards = false;
+                    for (size_t i = 1; i < rects.size(); i++) {
+                        backwards = backwards || (rects[i]->call < rects[i - 1]->call);
+                    }
+
+                    std::string key;
+                    for (size_t i = 0; i < rects.size(); i++) {
+                        int64_t step = (i == 0) ? -1 : (int64_t(rects[i]->call) - int64_t(rects[i - 1]->call));
+                        if (!backwards && (step > 2)) {
+                            step = 2;
+                        }
+
+                        key += std::to_string(rects[i]->fb) + ' ' + std::to_string(step) + rects[i]->rest;
+                    }
+
+                    skipRects = !seen.insert(XXH3_64bits(key.data(), key.size())).second;
+                }
+            }
+
+            if (file == nullptr) {
+                return;
+            }
+
+            for (const Line &l : f.lines) {
+                if (!(skipRects && l.rect)) {
+                    fprintf(file, "frame %" PRIu64 " fb %u call %u%s", f.number, l.fb, l.call, l.rest.c_str());
+                }
+            }
+
+            fflush(file);
+        }
     };
 
     // State
@@ -105,6 +239,8 @@ namespace RT64 {
         drawCall.rect.reset();
         drawCall.rectDsdx = 0;
         drawCall.rectDtdy = 0;
+        drawCall.rectS = 0; // JFG PORT
+        drawCall.rectT = 0;
         drawCall.rectLeftOrigin = G_EX_ORIGIN_NONE;
         drawCall.rectRightOrigin = G_EX_ORIGIN_NONE;
         drawCall.rectAspect = G_EX_ASPECT_AUTO;
@@ -223,7 +359,7 @@ namespace RT64 {
             // Detect the tile count based on the LOD setting.
             const bool usesLOD = (drawCall.otherMode.textLOD() == G_TL_LOD);
             if (usesLOD) {
-                drawCall.tileCount = drawCall.textureLevels;
+                drawCall.tileCount = std::min<uint32_t>(drawCall.textureLevels, RDP_TILES); // JFG PORT: never more tiles than the RDP has
             }
             // Detect the tile count based on what texels it uses.
             else {
@@ -522,6 +658,8 @@ namespace RT64 {
         // Reset attributes for the next draw call to be recorded.
         drawCall.rectDsdx = 0;
         drawCall.rectDtdy = 0;
+        drawCall.rectS = 0; // JFG PORT
+        drawCall.rectT = 0;
         drawCall.loadIndex = 0;
         drawCall.loadCount = 0;
         drawCall.minWorldMatrix = USHRT_MAX;
@@ -800,6 +938,269 @@ namespace RT64 {
                     const uint32_t rdpTileLimit = gameCall.callDesc.tileIndex + gameCall.callDesc.tileCount;
                     while (rdpTileCursor < rdpTileLimit) {
                         uploadTile(rdpTileCursor, fbPair, gameCall.callDesc);
+
+                        // JFG PORT: while dumping PNGs, log how each draw uses its texture (rectangle or triangles, screen
+                        // position, size, hash, wrap, filter, source address, modes, scene) to <dump dir>/draw_trace.txt,
+                        // for Toasty_Upscaler's stitching and padding (format in its RT64_INTEGRATION.md). Log only, it
+                        // changes nothing.
+                        if (!dumpingTexturesDirectory.empty() && dumpingTexturesPng) {
+                            const DrawCallTile &traceTile = workload.drawData.callTiles[rdpTileCursor];
+                            if (traceTile.valid && !traceTile.tileCopyUsed) {
+                                static std::string traceDir;
+                                static FILE *traceFile = nullptr;
+                                static TraceCompactor traceCompactor;
+                                static std::unordered_map<uint64_t, std::pair<interop::int2, interop::int2>> traceTrisLogged; // key -> widest texcoord extent logged
+                                const std::string dirString = dumpingTexturesDirectory.u8string();
+                                if (traceFile == nullptr || traceDir != dirString) {
+                                    traceCompactor.flush(traceFile);
+                                    if (traceFile != nullptr) {
+                                        fclose(traceFile);
+                                    }
+
+                                    traceDir = dirString;
+                                    traceTrisLogged.clear();
+                                    traceFile = fopen((dumpingTexturesDirectory / "draw_trace.txt").u8string().c_str(), "ab");
+                                }
+
+                                // The scene tag: lowercase [a-z0-9_.-], at most 48 characters, "unknown" until the host
+                                // names one. It changes only after the host's value has held for TraceSceneFrames frames,
+                                // so a scene change that flickers (level loads) keeps the old tag.
+                                const uint32_t TraceSceneFrames = 3;
+                                static std::string traceSceneCurrent = "unknown";
+                                static std::string traceScenePending;
+                                static uint32_t traceScenePendingFrames = 0;
+                                static uint64_t traceSceneFrame = UINT64_MAX;
+                                if (traceSceneFrame != workload.submissionFrame) {
+                                    traceSceneFrame = workload.submissionFrame;
+                                    std::string requested;
+                                    for (char c : traceScene) {
+                                        if (requested.size() >= 48) {
+                                            break;
+                                        }
+
+                                        const char l = ((c >= 'A') && (c <= 'Z')) ? char(c - 'A' + 'a') : c;
+                                        const bool allowed = ((l >= 'a') && (l <= 'z')) || ((l >= '0') && (l <= '9')) || (l == '_') || (l == '.') || (l == '-');
+                                        requested += allowed ? l : '_';
+                                    }
+
+                                    if (requested.empty()) {
+                                        requested = "unknown";
+                                    }
+
+                                    if (requested == traceSceneCurrent) {
+                                        traceScenePendingFrames = 0;
+                                    }
+                                    else {
+                                        traceScenePendingFrames = (requested == traceScenePending) ? (traceScenePendingFrames + 1) : 1;
+                                        traceScenePending = requested;
+                                        if (traceScenePendingFrames >= TraceSceneFrames) {
+                                            traceSceneCurrent = requested;
+                                            traceScenePendingFrames = 0;
+                                        }
+                                    }
+                                }
+
+                                const DrawCall &td = gameCall.callDesc;
+                                bool isRect = (proj.type == Projection::Type::Rectangle);
+
+                                // A flat 2D quad: two orthographic triangles whose corners make a screen-aligned box, with S
+                                // changing only along X and T only along Y (the title logo is 16 such strips). Logged as a
+                                // rectangle with " prim tris", every frame like one, so Toasty_Upscaler can stitch and treat
+                                // it as 2D. Its st is the texel the first pixel samples, as a texrect's would be.
+                                struct {
+                                    bool valid = false;
+                                    int32_t ulx, uly, lrx, lry;
+                                    int dsdx, dtdy;
+                                    double s, t;
+                                } quad;
+
+                                if (!isRect && (proj.type == Projection::Type::Orthographic) && (td.triangleCount == 2)) {
+                                    const std::vector<uint32_t> &faces = workload.drawData.faceIndices;
+                                    const std::vector<hlslpp::float3> &screen = workload.drawData.posScreen;
+                                    const std::vector<float> &tcs = workload.drawData.tcFloats;
+                                    const uint32_t start = gameCall.meshDesc.faceIndicesStart;
+                                    bool inRange = (start + 6) <= faces.size();
+                                    float px[6], py[6], pu[6], pv[6];
+                                    for (uint32_t i = 0; inRange && (i < 6); i++) {
+                                        const uint32_t v = faces[start + i];
+                                        inRange = (v < screen.size()) && ((v * 2 + 1) < tcs.size());
+                                        if (inRange) {
+                                            px[i] = screen[v].x;
+                                            py[i] = screen[v].y;
+                                            pu[i] = tcs[v * 2 + 0];
+                                            pv[i] = tcs[v * 2 + 1];
+                                        }
+                                    }
+
+                                    if (inRange) {
+                                        const float x0 = *std::min_element(px, px + 6), x1 = *std::max_element(px, px + 6);
+                                        const float y0 = *std::min_element(py, py + 6), y1 = *std::max_element(py, py + 6);
+                                        const float Eps = 0.01f;
+                                        bool flat = ((x1 - x0) >= 1.0f) && ((y1 - y0) >= 1.0f);
+                                        float sAt[2] = { 0.0f, 0.0f }, tAt[2] = { 0.0f, 0.0f };
+                                        bool sSet[2] = { false, false }, tSet[2] = { false, false };
+                                        for (uint32_t i = 0; flat && (i < 6); i++) {
+                                            const bool left = std::abs(px[i] - x0) < Eps, right = std::abs(px[i] - x1) < Eps;
+                                            const bool top = std::abs(py[i] - y0) < Eps, bottom = std::abs(py[i] - y1) < Eps;
+                                            flat = (left || right) && (top || bottom);
+                                            const int sx = right ? 1 : 0, ty = bottom ? 1 : 0;
+                                            if (flat) {
+                                                flat = (!sSet[sx] || (std::abs(sAt[sx] - pu[i]) < Eps)) && (!tSet[ty] || (std::abs(tAt[ty] - pv[i]) < Eps));
+                                                sAt[sx] = pu[i];
+                                                tAt[ty] = pv[i];
+                                                sSet[sx] = tSet[ty] = true;
+                                            }
+                                        }
+
+                                        // Both triangles together cover the box (not two halves of the same corner).
+                                        float area = 0.0f;
+                                        for (uint32_t t = 0; flat && (t < 2); t++) {
+                                            const uint32_t a = t * 3;
+                                            area += std::abs((px[a + 1] - px[a]) * (py[a + 2] - py[a]) - (px[a + 2] - px[a]) * (py[a + 1] - py[a])) * 0.5f;
+                                        }
+
+                                        flat = flat && sSet[0] && sSet[1] && tSet[0] && tSet[1] && (std::abs(area - (x1 - x0) * (y1 - y0)) < 0.01f * (x1 - x0) * (y1 - y0));
+                                        if (flat) {
+                                            const LoadTile &tile = traceTile.loadTile;
+                                            const double xScale = ShiftScaleMap[tile.shifts];
+                                            const double yScale = ShiftScaleMap[tile.shiftt];
+                                            const double stepS = (sAt[1] - sAt[0]) * xScale / (x1 - x0);
+                                            const double stepT = (tAt[1] - tAt[0]) * yScale / (y1 - y0);
+                                            quad.valid = true;
+                                            quad.ulx = int32_t(std::lround(x0 * 4.0f));
+                                            quad.uly = int32_t(std::lround(y0 * 4.0f));
+                                            quad.lrx = int32_t(std::lround(x1 * 4.0f));
+                                            quad.lry = int32_t(std::lround(y1 * 4.0f));
+                                            quad.dsdx = int(std::lround(stepS * 1024.0));
+                                            quad.dtdy = int(std::lround(stepT * 1024.0));
+
+                                            // The first pixel's centre samples edge + step / 2; a texrect's st is the texel it
+                                            // starts on: 0 for a quad from 0 forwards, 4 for 5 rows drawn flipped.
+                                            quad.s = sAt[0] * xScale - tile.uls / 4.0 + stepS * 0.5 - 0.5;
+                                            quad.t = tAt[0] * yScale - tile.ult / 4.0 + stepT * 0.5 - 0.5;
+                                            isRect = true;
+                                        }
+                                    }
+                                }
+
+                                // Wrap mode per axis: W repeat, M mirror, C clamp (clamp flag set, or no wrap mask).
+                                auto axisMode = [](uint8_t cm, uint8_t mask) -> char {
+                                    if (((cm & 2) != 0) || (mask == 0)) {
+                                        return 'C';
+                                    }
+
+                                    return ((cm & 1) != 0) ? 'M' : 'W';
+                                };
+
+                                const char wrapS = axisMode(traceTile.loadTile.cms, traceTile.loadTile.masks);
+                                const char wrapT = axisMode(traceTile.loadTile.cmt, traceTile.loadTile.maskt);
+
+                                // Rectangles are logged every time because their layout per frame matters. 3D draws are
+                                // logged the first time a texture shows up with a given wrap mode in a scene, so the file
+                                // stays small during gameplay and a texture shared by several scenes is tagged in each,
+                                // and again whenever the texcoord extent seen for that key grows (the uv field).
+                                bool logLine = true;
+                                const bool validUV = traceTile.validTexcoords();
+                                uint64_t trisKey = 0;
+                                if (!isRect) {
+                                    const uint64_t sceneKey = XXH3_64bits(traceSceneCurrent.data(), traceSceneCurrent.size());
+                                    trisKey = XXH3_64bits_withSeed(&traceTile.tmemHashOrID, sizeof(traceTile.tmemHashOrID), sceneKey) ^ (uint64_t(wrapS) << 56) ^ (uint64_t(wrapT) << 48);
+                                    auto inserted = traceTrisLogged.emplace(trisKey, std::make_pair(traceTile.minTexcoord, traceTile.maxTexcoord));
+                                    logLine = inserted.second;
+                                    if (!logLine && validUV) {
+                                        auto &extent = inserted.first->second;
+                                        const bool known = (extent.first.x <= extent.second.x) && (extent.first.y <= extent.second.y);
+                                        const bool grew = !known || (traceTile.minTexcoord.x < extent.first.x) || (traceTile.minTexcoord.y < extent.first.y) ||
+                                            (traceTile.maxTexcoord.x > extent.second.x) || (traceTile.maxTexcoord.y > extent.second.y);
+                                        if (grew) {
+                                            extent.first.x = known ? std::min(extent.first.x, traceTile.minTexcoord.x) : traceTile.minTexcoord.x;
+                                            extent.first.y = known ? std::min(extent.first.y, traceTile.minTexcoord.y) : traceTile.minTexcoord.y;
+                                            extent.second.x = known ? std::max(extent.second.x, traceTile.maxTexcoord.x) : traceTile.maxTexcoord.x;
+                                            extent.second.y = known ? std::max(extent.second.y, traceTile.maxTexcoord.y) : traceTile.maxTexcoord.y;
+                                            logLine = true;
+                                        }
+                                    }
+                                }
+
+                                if ((traceFile != nullptr) && logLine) {
+                                    // Texel values with up to two decimals and no trailing zeros: 0, 32, 15.5, -0.25.
+                                    auto texels = [](double v) -> std::string {
+                                        char s[32];
+                                        snprintf(s, sizeof(s), "%.2f", v);
+                                        std::string r(s);
+                                        while (!r.empty() && (r.back() == '0')) {
+                                            r.pop_back();
+                                        }
+
+                                        if (!r.empty() && (r.back() == '.')) {
+                                            r.pop_back();
+                                        }
+
+                                        return ((r == "-0") || r.empty()) ? std::string("0") : r;
+                                    };
+
+                                    const LoadTile &tile = traceTile.loadTile;
+                                    const uint32_t textFilt = td.otherMode.textFilt();
+                                    const char *filt = (textFilt == G_TF_POINT) ? "point" : ((textFilt == G_TF_AVERAGE) ? "average" : "bilerp");
+                                    const uint32_t src = rdp->rice.lastLoadOpByTMEM[tile.tmem].texture.address;
+
+                                    // The line after "frame N fb F call C"; traceCompactor writes it with those.
+                                    char line[1024];
+                                    int used = 0;
+                                    auto put = [&](const char *format, auto... values) {
+                                        if ((used >= 0) && (used < int(sizeof(line)))) {
+                                            const int n = snprintf(line + used, sizeof(line) - used, format, values...);
+                                            used = (n < 0) ? -1 : std::min(used + n, int(sizeof(line)) - 1);
+                                        }
+                                    };
+
+                                    if (quad.valid) {
+                                        put(" rect x %d..%d y %d..%d dsdx %d dtdy %d", quad.ulx, quad.lrx, quad.uly, quad.lry, quad.dsdx, quad.dtdy);
+                                    }
+                                    else if (isRect) {
+                                        put(" rect x %d..%d y %d..%d dsdx %d dtdy %d", td.rect.ulx, td.rect.lrx, td.rect.uly, td.rect.lry, int(td.rectDsdx), int(td.rectDtdy));
+                                    }
+                                    else {
+                                        put(" tris %u", td.triangleCount);
+                                    }
+
+                                    put(" tex %016" PRIx64 " size %ux%u ws %c wt %c filt %s", uint64_t(traceTile.tmemHashOrID), uint32_t(traceTile.sampleWidth), uint32_t(traceTile.sampleHeight), wrapS, wrapT, filt);
+                                    if (quad.valid) {
+                                        put(" st %s %s", texels(quad.s).c_str(), texels(quad.t).c_str());
+                                    }
+                                    else if (isRect) {
+                                        // Where the rectangle's top-left samples: the texrect's S and T (s10.5) minus the tile's
+                                        // upper-left corner (10.2), in texels.
+                                        put(" st %s %s", texels(td.rectS / 32.0 - tile.uls / 4.0).c_str(), texels(td.rectT / 32.0 - tile.ult / 4.0).c_str());
+                                    }
+                                    else if (validUV) {
+                                        // The texcoord extent the draw samples (whole texels, as RT64 tracks it), with the tile's
+                                        // shift and upper-left corner applied the way RT64 sizes its own sampling.
+                                        const double xScale = ShiftScaleMap[tile.shifts];
+                                        const double yScale = ShiftScaleMap[tile.shiftt];
+                                        const auto &extent = traceTrisLogged[trisKey];
+                                        put(" uv %s..%s %s..%s",
+                                            texels(extent.first.x * xScale - tile.uls / 4.0).c_str(), texels(extent.second.x * xScale - tile.uls / 4.0).c_str(),
+                                            texels(extent.first.y * yScale - tile.ult / 4.0).c_str(), texels(extent.second.y * yScale - tile.ult / 4.0).c_str());
+                                    }
+
+                                    put(" src %08x om %08x:%08x cc %08x:%08x", src, uint32_t(td.otherMode.H), uint32_t(td.otherMode.L), uint32_t(td.colorCombiner.H), uint32_t(td.colorCombiner.L));
+                                    if (!isRect || quad.valid) {
+                                        put(" gm %08x", td.geometryMode);
+                                    }
+
+                                    if (quad.valid) {
+                                        put(" prim %s", "tris");
+                                    }
+
+                                    put(" scene %s\n", traceSceneCurrent.c_str());
+                                    if (used > 0) {
+                                        traceCompactor.add(traceFile, uint64_t(workload.submissionFrame), uint32_t(p), td.callIndex, isRect, std::string(line, used), traceSceneCurrent);
+                                    }
+                                }
+                            }
+                        }
+
                         rdpTileCursor++;
                     }
                 }
@@ -1905,6 +2306,13 @@ namespace RT64 {
 
         const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
         const uint32_t screenFbAddress = newVI.fbAddress();
+        if (!fromEarlyPresent) {
+            // JFG PORT: which framebuffer the latest screen update shows, and how many there were. At 60 fps the game's
+            // next frame waits until the screen update that shows its buffer one last time has been taken here
+            // (src/jfg/jfg_frame_rate.cpp, jfg_sched_task_ready); updateScreen and display lists run on the same thread.
+            rt64_jfg_screen_fb.store(screenFbAddress, std::memory_order_release);
+            rt64_jfg_screen_updates.fetch_add(1, std::memory_order_acq_rel);
+        }
         const hlslpp::uint2 screenFbSize = newVI.fbSize();
         const uint8_t screenFbSiz = newVI.fbSiz();
         const bool viVisible = newVI.visible();
@@ -2349,7 +2757,7 @@ namespace RT64 {
                     else if (!dialogResults->nextDumpingTexturesDirectory.empty()) {
                         dumpingTexturesDirectory = dialogResults->nextDumpingTexturesDirectory;
                         dialogResults->nextDumpingTexturesDirectory.clear();
-                        textureManager.dumpedSet.clear();
+                        textureManager.resetDump(dumpingTexturesDirectory); // JFG PORT
                     }
 
                     if (ext.textureCache->textureMap.replacementMap.fileSystemIsDirectory) {
