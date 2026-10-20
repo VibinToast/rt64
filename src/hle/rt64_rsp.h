@@ -204,6 +204,19 @@ namespace RT64 {
             bool force8MBAddressMask;
             bool jfg; // JFG PORT: Jet Force Gemini command semantics
             bool jfgCullFlip = false; // JFG PORT: geometry mode bit 0x1000 swaps which side of a triangle is culled (mirrored reflections)
+            // JFG PORT: slot 0 holds the camera (view x projection, made on the CPU once per viewport) and every other
+            // slot a complete clip-space matrix. While slot 0 is a perspective camera, the camera goes on RT64's
+            // view/projection side and each draw's matrix becomes a model matrix (slot x inverse(camera)), so RT64 can
+            // interpolate the camera between frames. Orthographic slot 0 (HUD, menus) keeps the old identity setup.
+            bool jfgSplit = false;
+            std::array<uint32_t, 8> jfgIds; // per slot: the ID the game tagged its matrix with (0 = none, not interpolated)
+            std::array<hlslpp::float4x4, 8> jfgModels; // per slot: the exact model matrix from the tag, when jfgHasModel
+            std::array<bool, 8> jfgHasModel;
+            uint32_t jfgObjectId = 0; // the ID of the last tagged matrix load: the object whose bones follow
+            hlslpp::float4x4 jfgViewProj;
+            hlslpp::float4x4 jfgInvViewProj;
+            hlslpp::float4x4 jfgView;
+            hlslpp::float4x4 jfgProj;
         } DKR;
 
         struct {
@@ -262,6 +275,7 @@ namespace RT64 {
         void matrixFloat(uint32_t address, uint8_t params);
         void matrixDKR(uint32_t address, uint8_t index);
         void matrixJFG(uint32_t address, uint8_t param);
+        void setCameraJFG(const hlslpp::float4x4 &viewProj);
         void selectMatrixDKR(uint8_t index);
         void setBillboardDKR(bool enabled);
         void setDMAOffsetsDKR(uint32_t matrixOffset, uint32_t vertexOffset);

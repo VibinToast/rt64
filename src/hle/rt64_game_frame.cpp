@@ -2,6 +2,9 @@
 // RT64
 //
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "common/rt64_math.h"
 
 #include "rt64_game_frame.h"
@@ -374,6 +377,38 @@ namespace RT64 {
 
         matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
         matchScenes(orthographicScenes, prevFrame.orthographicScenes);
+
+        // JFG PORT: debug aid. RT64_INTERP_TRACE=1 prints, once a second, how much of a frame was matched to the one
+        // before it (what interpolation can move); the screen-rate counter cannot tell copies from in-between frames.
+        static const bool interpTrace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+        if (interpTrace) {
+            static uint32_t traceFrame = 0;
+            if ((traceFrame++ % 60) == 0) {
+                size_t transforms = 0, transformsMapped = 0, viewProjs = 0, viewProjsMapped = 0, transformsWithId = 0;
+                for (uint32_t w : workloads) {
+                    const Workload &workload = workloadQueue.workloads[w];
+                    for (uint32_t groupIndex : workload.drawData.worldTransformGroups) {
+                        const uint32_t id = workload.drawData.transformGroups[groupIndex].matrixId;
+                        transformsWithId += ((id != G_EX_ID_IGNORE) && (id != G_EX_ID_AUTO)) ? 1 : 0;
+                    }
+                }
+
+                for (const GameFrameMap::WorkloadMap &workloadMap : frameMap.workloads) {
+                    for (const GameFrameMap::TransformMap &transformMap : workloadMap.transforms) {
+                        transforms++;
+                        transformsMapped += transformMap.mapped ? 1 : 0;
+                    }
+
+                    for (const GameFrameMap::ViewProjectionMap &viewProjMap : workloadMap.viewProjections) {
+                        viewProjs++;
+                        viewProjsMapped += viewProjMap.mapped ? 1 : 0;
+                    }
+                }
+
+                fprintf(stderr, "[INTERP] perspective scenes %zu, orthographic %zu; transforms %zu with an ID %zu mapped %zu; view-projections %zu mapped %zu\n",
+                    perspectiveScenes.size(), orthographicScenes.size(), transforms, transformsWithId, transformsMapped, viewProjs, viewProjsMapped);
+            }
+        }
 
         if (!workloadsModified.empty()) {
             thread_local std::vector<BufferUploader::Upload> uploads;
