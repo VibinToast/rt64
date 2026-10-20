@@ -115,6 +115,9 @@ namespace RT64 {
         ProfilingTimer screenCpuProfiler = ProfilingTimer(120);
         ProfilingTimer viChangedProfiler = ProfilingTimer(120);
         std::filesystem::path dumpingTexturesDirectory;
+        bool dumpingTexturesPng = false; // JFG PORT: dump each texture as <hash>.png only (decoded from TMEM), ready for a replacement pack, and log draw_trace.txt
+        bool dumpingTexturesSkipDynamic = true; // JFG PORT: stop dumping sources that change on most frames (dynamic_sources.txt)
+        std::string traceScene = "unknown"; // JFG PORT: the level or screen on screen, set by the host before each display list; stamped on every draw_trace.txt line
         bool configurationSaveQueued = false;
         uint64_t workloadId = 0;
         uint64_t presentId = 0;

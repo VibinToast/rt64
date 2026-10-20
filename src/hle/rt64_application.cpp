@@ -58,6 +58,19 @@ namespace RT64 {
         vi.vBurst.word = *VI_V_BURST_REG;
         vi.xTransform.word = *VI_X_SCALE_REG;
         vi.yTransform.word = *VI_Y_SCALE_REG;
+
+        // JFG port debug aid: RT64_VI_TRACE=1 logs the VI registers whenever they change.
+        static const bool viTrace = std::getenv("RT64_VI_TRACE") != nullptr;
+        if (viTrace) {
+            static uint32_t last[6] = {};
+            const uint32_t now[6] = { getenv("RT64_VI_TRACE")[0] == '2' ? vi.origin : 0, vi.width, vi.hRegion.word, vi.vRegion.word, vi.xTransform.word, vi.yTransform.word };
+            if (memcmp(last, now, sizeof(now)) != 0) {
+                memcpy(last, now, sizeof(now));
+                const hlslpp::uint2 fb = vi.fbSize();
+                fprintf(stderr, "[VI] origin=%06X status=%08X width=%u h=%u..%u v=%u..%u xScale=%u yScale=%u -> fbSize %ux%u\n", vi.origin, vi.status.word, vi.width,
+                    vi.hRegion.hStart, vi.hRegion.hEnd, vi.vRegion.vStart, vi.vRegion.vEnd, vi.xTransform.xScale, vi.yTransform.yScale, uint32_t(fb.x), uint32_t(fb.y));
+            }
+        }
         return vi;
     }
 

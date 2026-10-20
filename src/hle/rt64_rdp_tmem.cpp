@@ -6,6 +6,8 @@
 
 #include <cassert>
 #include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 
@@ -44,13 +46,14 @@ namespace RT64 {
             textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, 0, LoadTile(), false);
         }
         
-        // Dump memory contents into a file if the process is active.
-        if (!state->dumpingTexturesDirectory.empty()) {
+        // Dump memory contents into a file if the process is active. JFG PORT: not for PNG dumps, raw TMEM is not an
+        // image (it shows up as noise).
+        if (!state->dumpingTexturesDirectory.empty() && !state->dumpingTexturesPng) {
             // Since width and height are not exactly guaranteed to be sane values when using raw TMEM, ensure we only dump textures when the values make sense.
             const bool validTextureCheck = (width > 0x0) && (height > 0x0);
             const bool bigTextureCheck = (width > 0x1000) || (height > 0x1000);
             if (validTextureCheck && !bigTextureCheck) {
-                dumpTexture(hash, state, loadTile, width, height, tlut, false);
+                dumpTexture(hash, state, loadTile, width, height, tlut, creationFrame, false);
             }
         }
 
@@ -67,19 +70,271 @@ namespace RT64 {
 
         // Dump memory contents into a file if the process is active.
         if (!state->dumpingTexturesDirectory.empty()) {
-            dumpTexture(hash, state, loadTile, width, height, tlut, true);
+            dumpTexture(hash, state, loadTile, width, height, tlut, creationFrame, true);
         }
 
         return hash;
     }
 
-    void TextureManager::dumpTexture(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, bool savePNG) {
+    // JFG PORT: CPU version of sampleTMEM() in shaders/TextureDecoder.hlsli, so a dumped texture looks exactly the
+    // way RT64 decodes it for drawing.
+    namespace {
+        struct TexelRGBA { uint8_t r, g, b, a; };
+
+        uint8_t loadTMEMMasked(const uint8_t *T, uint32_t rel, uint32_t mask, uint32_t orAddress, bool oddRow, uint32_t start, uint32_t stride) {
+            const uint32_t rowStart = (rel / stride) * stride;
+            const uint32_t wordIndex = (rel - rowStart) / 4;
+            const uint32_t finalAddress = oddRow ? (start + rowStart + ((wordIndex ^ 1) * 4) + (rel & 0x3)) : (start + rel);
+            return T[((finalAddress & mask) | orAddress) & 0xFFF];
+        }
+
+        TexelRGBA expand(uint32_t r, uint32_t g, uint32_t b, uint32_t a) { return { uint8_t(r), uint8_t(g), uint8_t(b), uint8_t(a) }; }
+        TexelRGBA fromI(uint32_t i) { return expand(i, i, i, i); }
+        TexelRGBA fromRGBA16(uint32_t v) {
+            const uint32_t r = (v >> 11) & 0x1F, g = (v >> 6) & 0x1F, b = (v >> 1) & 0x1F;
+            return expand((r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), (v & 1) ? 255 : 0);
+        }
+        TexelRGBA fromIA16(uint32_t v) { return expand((v >> 8) & 0xFF, (v >> 8) & 0xFF, (v >> 8) & 0xFF, v & 0xFF); }
+
+        TexelRGBA sampleTMEMCPU(const uint8_t *T, int x, int y, uint32_t siz, uint32_t fmt, uint32_t address, uint32_t stride, uint32_t tlut, uint32_t palette) {
+            const bool oddRow = (y & 1) != 0;
+            const bool oddColumn = (x & 1) != 0;
+            const bool isRgba32 = (fmt == G_IM_FMT_RGBA) && (siz == G_IM_SIZ_32b);
+            const bool usesTlut = tlut > 0;
+            const uint32_t tmemShift = isRgba32 ? 2 : siz;
+            const uint32_t addressMask = (isRgba32 || usesTlut) ? 0x7FF : 0xFFF;
+            const uint32_t pixelAddress = uint32_t(y) * stride + ((uint32_t(x) << tmemShift) >> 1);
+            const uint32_t p0 = loadTMEMMasked(T, pixelAddress + 0, addressMask, 0, oddRow, address, stride);
+            const uint32_t p1 = loadTMEMMasked(T, pixelAddress + 1, addressMask, 0, oddRow, address, stride);
+            const uint32_t p4 = (p0 >> (oddColumn ? 0 : 4)) & 0xF;
+            if (usesTlut) {
+                const uint32_t paletteAddress = (siz == G_IM_SIZ_4b) ? (0x800 + (palette << 7) + (p4 << 3)) : (0x800 + (p0 << 3));
+                const uint32_t value = T[(paletteAddress + 1) & 0xFFF] | (uint32_t(T[paletteAddress & 0xFFF]) << 8);
+                if (tlut == G_TT_RGBA16) return fromRGBA16(value);
+                if (tlut == G_TT_IA16) return fromIA16(value);
+                return expand(0, 0, 0, 255);
+            }
+
+            const uint32_t pixelAddress2 = isRgba32 ? pixelAddress : pixelAddress + 2;
+            const uint32_t orAddress = isRgba32 ? 0x800 : 0;
+            const uint32_t p2 = loadTMEMMasked(T, pixelAddress2 + 0, addressMask, orAddress, oddRow, address, stride);
+            const uint32_t p3 = loadTMEMMasked(T, pixelAddress2 + 1, addressMask, orAddress, oddRow, address, stride);
+            switch (siz) {
+            case G_IM_SIZ_4b:
+                if (fmt == G_IM_FMT_CI) return fromI((palette << 4) | p4);
+                if (fmt == G_IM_FMT_IA) { uint32_t i = p4 & 0xE; i = (i << 4) | (i << 1) | (i >> 2); return expand(i, i, i, (p4 & 1) ? 255 : 0); }
+                if ((fmt == G_IM_FMT_I) || (fmt == G_IM_FMT_RGBA)) return fromI((p4 << 4) | p4);
+                return expand(0, 0, 0, 255);
+            case G_IM_SIZ_8b:
+                if (fmt == G_IM_FMT_IA) { const uint32_t i = (p0 >> 4) & 0xF, a = p0 & 0xF; return expand((i << 4) | i, (i << 4) | i, (i << 4) | i, (a << 4) | a); }
+                if ((fmt == G_IM_FMT_I) || (fmt == G_IM_FMT_RGBA) || (fmt == G_IM_FMT_CI)) return fromI(p0);
+                return expand(0, 0, 0, 255);
+            case G_IM_SIZ_16b: {
+                const uint32_t v = p1 | (p0 << 8);
+                if (fmt == G_IM_FMT_RGBA) return fromRGBA16(v);
+                if (fmt == G_IM_FMT_IA) return fromIA16(v);
+                if ((fmt == G_IM_FMT_CI) || (fmt == G_IM_FMT_I)) return expand(p0, p1, p0, p1);
+                return expand(0, 0, 0, 255);
+            }
+            case G_IM_SIZ_32b:
+                if (fmt == G_IM_FMT_RGBA) return expand(p0, p1, p2, p3);
+                if ((fmt == G_IM_FMT_CI) || (fmt == G_IM_FMT_IA) || (fmt == G_IM_FMT_I)) return oddColumn ? expand(p0, p1, p0, p1) : expand(p2, p3, p2, p3);
+                return expand(0, 0, 0, 255);
+            default:
+                return expand(0, 0, 0, 255);
+            }
+        }
+
+        // A source is dynamic once it has shown more than DynamicHashLimit distinct textures and changed on at least
+        // DynamicChangeFrames of the last DynamicWindowFrames frames. 12 of 30, not the 20 of 30 Toasty_Upscaler's
+        // RT64_INTEGRATION.md suggests: at 60 fps the game draws a frame per tick, but enemies and tribals update only
+        // every 2nd tick, so a texture they redraw per update changes on 15 of 30 frames.
+        const size_t DynamicHashLimit = 16;
+        const size_t DynamicChangeFrames = 12;
+        const uint64_t DynamicWindowFrames = 30;
+    };
+
+    bool TextureManager::dumpSourceIsDynamic(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, uint64_t creationFrame, DumpSource *&source) {
+        const LoadOperation &loadOp = state->rdp->rice.lastLoadOpByTMEM[loadTile.tmem];
+        const DumpSourceKey key(loadOp.texture.address, loadTile.fmt, loadTile.siz, width, height, tlut, loadTile.palette);
+        auto inserted = dumpSources.emplace(key, DumpSource());
+        DumpSource &src = inserted.first->second;
+        source = &src;
+        if (inserted.second) {
+            src.firstFrame = creationFrame;
+        }
+
+        if (src.dynamic) {
+            return true;
+        }
+
+        // Tracked before the already-dumped check: a hash seen before is still a change when it differs from the last
+        // one, which is how a looping animation looks.
+        if (hash != src.lastHash) {
+            if ((src.lastHash != 0) && (src.changeFrames.empty() || (src.changeFrames.back() != creationFrame))) {
+                src.changeFrames.push_back(creationFrame);
+            }
+
+            src.lastHash = hash;
+            if (src.hashes.size() <= DynamicHashLimit) {
+                src.hashes.insert(hash);
+            }
+        }
+
+        while (!src.changeFrames.empty() && (src.changeFrames.front() + DynamicWindowFrames <= creationFrame)) {
+            src.changeFrames.pop_front();
+        }
+
+        if ((src.hashes.size() <= DynamicHashLimit) || (src.changeFrames.size() < DynamicChangeFrames)) {
+            return false;
+        }
+
+        // Flagged: move what was already written aside (not deleted, so a false positive can be undone) and log why.
+        src.dynamic = true;
+        const std::filesystem::path dynamicDirectory = state->dumpingTexturesDirectory / "_dynamic";
+        std::error_code ec;
+        std::filesystem::create_directories(dynamicDirectory, ec);
+        for (const std::filesystem::path &path : src.written) {
+            std::filesystem::rename(path, dynamicDirectory / path.filename(), ec);
+        }
+
+        FILE *log = fopen((state->dumpingTexturesDirectory / "dynamic_sources.txt").u8string().c_str(), "ab");
+        if (log != nullptr) {
+            fprintf(log, "address %08x size %ux%u fmt %u siz %u tlut %u palette %u: %zu+ distinct textures, first frame %" PRIu64 ", flagged frame %" PRIu64 ", %zu files moved to _dynamic\n",
+                loadOp.texture.address, width, height, loadTile.fmt, loadTile.siz, tlut, loadTile.palette, src.hashes.size(), src.firstFrame, creationFrame, src.written.size());
+            fclose(log);
+        }
+
+        src.written.clear();
+        return true;
+    }
+
+    bool TextureManager::dumpTexturePng(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, std::filesystem::path &path) {
+        const uint32_t stride = uint32_t(loadTile.line) << 3;
+        if ((width == 0) || (height == 0) || (width > 1024) || (height > 1024) || (stride == 0)) {
+            return false;
+        }
+
+        // A texture whose rows would not fit in TMEM cannot have been loaded whole: the size comes from the tile's wrap
+        // mask (up to 256 x 256), and sampling it reads whatever else TMEM holds, which dumps as noise. RGBA32 and
+        // palette textures only have half of TMEM for their texels.
+        const bool halfTMEM = (tlut > 0) || ((loadTile.fmt == G_IM_FMT_RGBA) && (loadTile.siz == G_IM_SIZ_32b));
+        if (uint32_t(height) * stride > (halfTMEM ? 0x800U : 0x1000U)) {
+            return false;
+        }
+
+        // Likewise a row wider than the tile's line (rows would overlap): the width is a wrap size, not loaded data.
+        const bool isRgba32 = (loadTile.fmt == G_IM_FMT_RGBA) && (loadTile.siz == G_IM_SIZ_32b);
+        const uint32_t rowBytes = (uint32_t(width) << (isRgba32 ? 2 : loadTile.siz)) >> 1;
+        if (rowBytes > stride) {
+            static int logged = 0;
+            if (logged++ < 8) fprintf(stderr, "[JFG] texture dump: skipped %ux%u fmt %u siz %u line %u (%u bytes per row)\n", width, height, loadTile.fmt, loadTile.siz, loadTile.line, rowBytes);
+            return false;
+        }
+
+        const uint8_t *T = reinterpret_cast<const uint8_t *>(state->rdp->TMEM);
+        std::vector<TexelRGBA> pixels(size_t(width) * height);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                pixels[size_t(y) * width + x] = sampleTMEMCPU(T, x, y, loadTile.siz, loadTile.fmt, uint32_t(loadTile.tmem) << 3, stride, tlut, loadTile.palette);
+            }
+        }
+
+        // Character shadows: the game renders each character's silhouette into a 64x64 texture every frame (black,
+        // with the soft edge only in the alpha), so every pose is a new texture that a replacement would never match
+        // again. Not dumped: 64x64 with every visible texel black. (Glows and other white or grey alpha masks of the
+        // same size are kept.)
+        if ((width == 64) && (height == 64)) {
+            int visible = 0;
+            bool shadow = true;
+            for (const TexelRGBA &p : pixels) {
+                if (p.a == 0) continue;
+                if ((p.r > 8) || (p.g > 8) || (p.b > 8)) { shadow = false; break; }
+                visible++;
+            }
+            if (shadow && (visible > 0)) {
+                static int skipped = 0;
+                if (++skipped <= 3) fprintf(stderr, "[JFG] texture dump: skipped character shadow %016" PRIx64 "\n", hash);
+                return false;
+            }
+        }
+
+        char name[64];
+        snprintf(name, sizeof(name), "%016" PRIx64 ".png", hash);
+        path = state->dumpingTexturesDirectory / name;
+        const std::string pathString = path.u8string();
+        if (stbi_write_png(pathString.c_str(), width, height, 4, pixels.data(), int(width) * 4) == 0) {
+            return false;
+        }
+
+        // texture_info.txt: what never changes for this hash, one line as its PNG is written (Toasty_Upscaler's
+        // RT64_INTEGRATION.md, "Per texture"): the format the PNG was decoded with, the palette, and the RDRAM
+        // addresses it was loaded from.
+        static const char *const FmtNames[] = { "RGBA", "YUV", "CI", "IA", "I" };
+        const char *fmtName = (loadTile.fmt < 5) ? FmtNames[loadTile.fmt] : "RGBA";
+        const char *tlutName = (tlut == G_TT_RGBA16) ? "rgba16" : ((tlut == G_TT_IA16) ? "ia16" : "none");
+        const bool CI4 = (loadTile.fmt == G_IM_FMT_CI) && (loadTile.siz == G_IM_SIZ_4b);
+        const uint32_t src = state->rdp->rice.lastLoadOpByTMEM[loadTile.tmem].texture.address;
+        FILE *info = fopen((state->dumpingTexturesDirectory / "texture_info.txt").u8string().c_str(), "ab");
+        if (info != nullptr) {
+            fprintf(info, "tex %016" PRIx64 " fmt %s siz %u tlut %s pal %u line %u src %08x", hash, fmtName, 4U << loadTile.siz, tlutName, CI4 ? uint32_t(loadTile.palette) : 0U, uint32_t(loadTile.line), src);
+            if ((loadTile.fmt == G_IM_FMT_CI) && (tlut > 0)) {
+                const uint32_t paletteTMEM = (RDP_TMEM_WORDS >> 1) + (CI4 ? (uint32_t(loadTile.palette) << 4) : 0);
+                fprintf(info, " tlutsrc %08x", state->rdp->rice.lastLoadOpByTMEM[paletteTMEM].texture.address);
+            }
+
+            fprintf(info, "\n");
+            fclose(info);
+        }
+
+        return true;
+    }
+
+    void TextureManager::resetDump(const std::filesystem::path &directory) {
+        dumpedSet.clear();
+        dumpSources.clear();
+
+        // JFG PORT: a dump continued in a folder that already holds PNGs (a new session) does not write those textures,
+        // or their texture_info.txt lines, again. Their names start with the hash, in the folder or _dynamic/.
+        if (directory.empty()) {
+            return;
+        }
+
+        std::error_code ec;
+        for (const std::filesystem::path &folder : { directory, directory / "_dynamic" }) {
+            for (std::filesystem::directory_iterator it(folder, ec), end; !ec && (it != end); it.increment(ec)) {
+                const std::string name = it->path().filename().u8string();
+                if ((name.size() >= 20) && (it->path().extension() == ".png") && (name.find_first_not_of("0123456789abcdef") == 16)) {
+                    dumpedSet.insert(std::strtoull(name.substr(0, 16).c_str(), nullptr, 16));
+                }
+            }
+        }
+    }
+
+    void TextureManager::dumpTexture(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, uint64_t creationFrame, bool savePNG) {
+        // JFG PORT: textures the game redraws on most frames are not dumped (see dumpSourceIsDynamic). Only for PNG dumps.
+        DumpSource *source = nullptr;
+        if (state->dumpingTexturesPng && state->dumpingTexturesSkipDynamic && dumpSourceIsDynamic(hash, state, loadTile, width, height, tlut, creationFrame, source)) {
+            return;
+        }
+
         if (dumpedSet.find(hash) != dumpedSet.end()) {
             return;
         }
 
         // Insert into set regardless of whether the dump is successful or not.
         dumpedSet.insert(hash);
+
+        // JFG PORT: PNG dumping for texture packs. The file name is the hash RT64 looks replacements up by, which is
+        // what the "rt64" auto path of a replacement database matches on.
+        if (state->dumpingTexturesPng) {
+            std::filesystem::path path;
+            if (dumpTexturePng(hash, state, loadTile, width, height, tlut, path) && (source != nullptr)) {
+                source->written.push_back(path);
+            }
+
+            return;
+        }
         
         // Dump the entirety of TMEM.
         char baseName[64];
