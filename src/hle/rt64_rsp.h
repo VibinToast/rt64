@@ -212,7 +212,8 @@ namespace RT64 {
             std::array<uint32_t, 8> jfgIds; // per slot: the ID the game tagged its matrix with (0 = none, not interpolated)
             std::array<hlslpp::float4x4, 8> jfgModels; // per slot: the exact model matrix from the tag, when jfgHasModel
             std::array<bool, 8> jfgHasModel;
-            uint32_t jfgObjectId = 0; // the ID of the last tagged matrix load: the object whose bones follow
+            uint32_t jfgObjectId = 0; // the object whose bone buffer G_DMAOFFSETS points into (0 = none)
+            uint32_t jfgBoneOffset = 0; // where in that buffer the offset points
             hlslpp::float4x4 jfgViewProj;
             hlslpp::float4x4 jfgInvViewProj;
             hlslpp::float4x4 jfgView;
@@ -276,6 +277,7 @@ namespace RT64 {
         void matrixDKR(uint32_t address, uint8_t index);
         void matrixJFG(uint32_t address, uint8_t param);
         void setCameraJFG(const hlslpp::float4x4 &viewProj);
+        void endObjectJFG();
         void selectMatrixDKR(uint8_t index);
         void setBillboardDKR(bool enabled);
         void setDMAOffsetsDKR(uint32_t matrixOffset, uint32_t vertexOffset);

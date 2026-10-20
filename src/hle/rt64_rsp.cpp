@@ -80,6 +80,46 @@ static bool jfgMatrixModel(uint32_t address, hlslpp::float4x4 &model) {
 }
 
 // The tag's ID, and its model matrix in model (hasModel), for a slot load from this address.
+// JFG PORT: the bone buffers of the object being drawn, tagged by the game (src/jfg/jfg_interpolation.cpp) with the
+// object's ID. A model's bones are multiplied from the buffer the game's G_DMAOFFSETS points at.
+namespace {
+    struct JfgBoneBufferTag {
+        std::atomic<uint32_t> address{ 0 };
+        std::atomic<uint32_t> id{ 0 };
+    };
+
+    JfgBoneBufferTag jfgBoneBufferTags[1 << 12];
+
+    JfgBoneBufferTag &jfgBoneBufferTagFor(uint32_t address) {
+        return jfgBoneBufferTags[(address >> 6) & ((1 << 12) - 1)];
+    }
+}
+
+void rt64_jfg_tag_bone_buffer(uint32_t address, uint32_t id) {
+    JfgBoneBufferTag &tag = jfgBoneBufferTagFor(address);
+    tag.address.store(0, std::memory_order_relaxed);
+    tag.id.store(id, std::memory_order_relaxed);
+    tag.address.store(address, std::memory_order_release);
+}
+
+// The object whose bone buffer holds this address (up to 128 bones in: a model part can start inside its buffer),
+// and the address's distance from the buffer's start.
+static uint32_t jfgBoneBufferId(uint32_t address, uint32_t &offsetInBuffer) {
+    for (uint32_t back = 0; back <= 0x2000; back += 0x40) {
+        if (back > address) {
+            break;
+        }
+
+        const JfgBoneBufferTag &tag = jfgBoneBufferTagFor(address - back);
+        if (tag.address.load(std::memory_order_acquire) == (address - back)) {
+            offsetInBuffer = back;
+            return tag.id.load(std::memory_order_relaxed);
+        }
+    }
+
+    return 0;
+}
+
 static uint32_t jfgMatrixId(const uint8_t *rdram, uint32_t address, hlslpp::float4x4 &model, bool &hasModel) {
     hasModel = false;
     // Debug aid: RT64_INTERP_TRACE=1 also counts how slot loads found their tag.
@@ -199,6 +239,7 @@ namespace RT64 {
         DKR.jfgIds.fill(0);
         DKR.jfgHasModel.fill(false);
         DKR.jfgObjectId = 0;
+        DKR.jfgBoneOffset = 0;
         DKR.force8MBAddressMask = false;
         DKR.jfg = false;
 
@@ -370,14 +411,16 @@ namespace RT64 {
         if (dst == 0) {
             DKR.jfgIds[0] = 0;
             DKR.jfgHasModel[0] = false;
+            endObjectJFG(); // the camera of a new viewport (or frame): no object is being drawn
         }
         else if (param & 0x80) {
             // A model's bones (the game's animation matrices) are world-space model matrices multiplied onto the camera
-            // in slot 0, so the loaded matrix is the bone's exact model matrix. Its ID: the object drawn now (its own
-            // matrix was the last tagged load) with the bone's place in its buffer.
+            // in slot 0, so the loaded matrix is the bone's exact model matrix. Its ID: the object whose bone buffer
+            // G_DMAOFFSETS points at (setDMAOffsetsDKR) with the bone's place in that buffer.
             const bool ontoCamera = (src == 0);
             const uint32_t parentId = ontoCamera ? DKR.jfgObjectId : DKR.jfgIds[src];
-            const uint32_t boneId = parentId ? ((parentId * 2654435761u) ^ ((address & 0x00FFFFFFu) >> 6) * 40503u) : 0;
+            const uint32_t bonePlace = DKR.jfgBoneOffset + (address & 0x00FFFFFFu);
+            const uint32_t boneId = parentId ? ((parentId * 2654435761u) ^ (bonePlace * 40503u)) : 0;
             DKR.jfgIds[dst] = ((boneId == G_EX_ID_IGNORE) || (boneId == G_EX_ID_AUTO)) ? 0 : boneId;
             DKR.jfgHasModel[dst] = ontoCamera || DKR.jfgHasModel[src];
             if (ontoCamera) {
@@ -391,7 +434,6 @@ namespace RT64 {
             bool hasModel = false;
             DKR.jfgIds[dst] = jfgMatrixId(state->fromRDRAM(0), rdramAddress, DKR.jfgModels[dst], hasModel);
             DKR.jfgHasModel[dst] = hasModel;
-            DKR.jfgObjectId = DKR.jfgIds[dst];
         }
 
         // Debug aid (RT64_INTERP_TRACE): the kinds of matrix loads.
@@ -419,6 +461,12 @@ namespace RT64 {
         }
 
         selectMatrixDKR(dst);
+    }
+
+    // JFG PORT: bones multiplied from now on belong to no object until G_DMAOFFSETS points into a tagged bone buffer.
+    void RSP::endObjectJFG() {
+        DKR.jfgObjectId = 0;
+        DKR.jfgBoneOffset = 0;
     }
 
     // JFG PORT: slot 0 was loaded. A perspective camera has a w column that depends on position (the game's
@@ -614,6 +662,15 @@ namespace RT64 {
         // DMEM; the vertex cursor (0x14C) and the transformed vertex slots
         // are untouched.
         DKR.matrixOffset = matrixOffset;
+
+        // JFG PORT: the object whose bones follow is the one whose bone buffer the offset points into (tagged by the
+        // game); 0 (the game resets it when the bones are drawn) or an untagged buffer is no object.
+        if (DKR.jfg) {
+            uint32_t offsetInBuffer = 0;
+            const uint32_t id = (matrixOffset != 0) ? jfgBoneBufferId(matrixOffset & 0x00FFFFFFu, offsetInBuffer) : 0;
+            DKR.jfgObjectId = id;
+            DKR.jfgBoneOffset = id ? offsetInBuffer : 0;
+        }
         DKR.vertexOffset = vertexOffset;
     }
 
