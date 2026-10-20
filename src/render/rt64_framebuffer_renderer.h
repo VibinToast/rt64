@@ -87,6 +87,50 @@ namespace RT64 {
         RenderPipeline *postBlendDitherNoiseAddPipeline = nullptr;
         RenderPipeline *postBlendDitherNoiseSubPipeline = nullptr;
         RenderPipeline *postBlendDitherNoiseSubNegativePipeline = nullptr;
+        RenderPipeline *ssaoPipeline = nullptr; // JFG PORT
+        RenderPipeline *ssaoBlurPipeline = nullptr; // JFG PORT: bloom layout
+        RenderPipeline *fogPipeline = nullptr; // JFG PORT
+        RenderPipeline *vignettePipeline = nullptr; // JFG PORT
+        // JFG PORT: bloom. Two small buffers per bloom-buffer size (kept: sizes rarely change, and a buffer may still
+        // be referenced by the command list being recorded), and the descriptor sets made while recording one workload.
+        struct BloomBuffers {
+            uint32_t width = 0;
+            uint32_t height = 0;
+            std::unique_ptr<RenderTexture> texture[2];
+            std::unique_ptr<RenderTextureView> textureView[2];
+            std::unique_ptr<RenderFramebuffer> framebuffer[2];
+        };
+        std::vector<std::unique_ptr<BloomBuffers>> bloomBuffers;
+        std::vector<std::unique_ptr<BloomBuffers>> bloomBuffersRetired;
+        std::vector<std::unique_ptr<BloomBuffers>> ssaoBuffers; // JFG PORT: ambient occlusion buffer (texture[0] only), full size
+        std::vector<std::unique_ptr<RenderTargetCopyDescriptorSet>> bloomDescriptorSets;
+        // JFG PORT: the scene as it was just before the glow was added, kept so that the next frame can start from it. Without
+        // this, the parts of the screen the game does not draw again (the sides in widescreen, what the camera sees beyond the
+        // level) keep last frame's glow and get it added again, every frame, until they are white. The game draws into
+        // two (or more) colour buffers in turn, so each one has its own copy.
+        struct BloomSnapshot {
+            std::unique_ptr<RenderTexture> texture;
+            const RenderTarget *target = nullptr;
+            const RenderTexture *targetTexture = nullptr; // a target that was recreated is a different picture
+            uint32_t width = 0;
+            uint32_t height = 0;
+            uint32_t samples = 0;
+            RenderFormat format = RenderFormat::UNKNOWN;
+            uint32_t frame = 0;
+            bool valid = false;
+        };
+        std::vector<std::unique_ptr<BloomSnapshot>> bloomSnapshots;
+        std::vector<std::unique_ptr<RenderTexture>> bloomSnapshotRetired;
+        uint32_t jfgFrame = 0;
+        const RenderTarget *jfgSidesClearedTarget = nullptr; // the colour buffer whose widescreen sides were cleared in jfgSidesClearedFrame
+        uint32_t jfgSidesClearedFrame = 0;
+        std::vector<std::pair<const RenderTarget *, uint32_t>> jfgTargetsTouched; // colour buffer and the frame it was last drawn into
+        RenderPipelineLayout *bloomPipelineLayout = nullptr;
+        RenderPipeline *bloomExtractPipeline = nullptr;
+        RenderPipeline *bloomBlurPipeline = nullptr;
+        RenderPipeline *bloomCompositePipeline = nullptr;
+        BloomBuffers *getBloomBuffers(RenderWorker *worker, uint32_t width, uint32_t height, bool ssao = false);
+        RenderDescriptorSet *makeBloomDescriptorSet(RenderWorker *worker, RenderTexture *texture, RenderTextureView *textureView);
         std::unique_ptr<FramebufferRendererDescriptorCommonSet> descCommonSet;
         std::unique_ptr<FramebufferRendererDescriptorTextureSet> descTextureSet;
         std::unique_ptr<RenderTexture> dummyColorTarget;
