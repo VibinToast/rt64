@@ -518,7 +518,7 @@ namespace RT64 {
         lookAtCheckSet.clear();
 
         // Traverse the map and fill the set with all the combinations of transforms to check.
-        for (std::pair<uint64_t, GameCallMap> curIt : curCallHashMap) {
+        for (const std::pair<const uint64_t, GameCallMap> &curIt : curCallHashMap) {
             auto prevRange = prevCallHashMap.equal_range(curIt.first);
             for (auto prevIt = prevRange.first; prevIt != prevRange.second; prevIt++) {
                 const GameIndices::Projection &curProjIndices = curScene.projections[curIt.second.sceneProjIndex];

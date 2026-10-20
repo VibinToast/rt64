@@ -39,6 +39,8 @@ namespace RT64 {
         std::unordered_map<uint64_t, std::unique_ptr<RasterShader>> GPUShaders;
         std::mutex GPUShadersMutex;
         std::list<std::unique_ptr<CompilationThread>> compilationThreads;
+        std::atomic<bool> compilationEnabled = true;
+        std::ofstream shaderCapture;
         uint32_t threadCount;
         uint32_t ubershaderThreadCount;
         RenderShaderFormat shaderFormat;
@@ -49,6 +51,7 @@ namespace RT64 {
         RasterShaderCache(uint32_t threadCount, uint32_t ubershaderThreadCount);
         ~RasterShaderCache();
         void setup(RenderDevice *device, RenderShaderFormat shaderFormat, const ShaderLibrary *shaderLibrary, const RenderMultisampling &multisampling);
+        void setCompilationEnabled(bool enabled);
         void submit(const ShaderDescription &desc);
         void waitForAll();
         void destroyAll();

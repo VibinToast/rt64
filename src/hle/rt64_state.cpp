@@ -549,10 +549,24 @@ namespace RT64 {
             auto &colorImg = fbPair.colorImage;
             auto &depthImg = fbPair.depthImage;
             uint32_t colorHeight = fbPair.drawColorRect.bottom(true);
+            if (rsp->DKR.force8MBAddressMask && (colorImg.width == 320)) {
+                // NTSC DKR framebuffers are 320x240. A torn dynamic display
+                // list can briefly supply garbage rectangle bounds; never let
+                // that turn into a framebuffer write over the adjacent game
+                // heap while the parser's malformed-list guard recovers.
+                colorHeight = std::min(colorHeight, 240U);
+            }
             uint32_t colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
             uint32_t depthWriteWidth = 0;
             RT64::Framebuffer *colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
             colorImg.formatChanged = colorFb->widthChanged || colorFb->sizChanged || colorFb->rdramChanged;
+            if (colorImg.formatChanged && (std::getenv("RT64_DKR_FB_OVERLAP_LOG") != nullptr)) {
+                static uint32_t flagLogCount = 0;
+                if (flagLogCount++ < 256) {
+                    std::fprintf(stderr, "[RT64] color fb %08X flags: width=%d siz=%d rdram=%d\n",
+                        colorImg.address, int(colorFb->widthChanged), int(colorFb->sizChanged), int(colorFb->rdramChanged));
+                }
+            }
             colorFb->clearChanged();
             colorFb->addDitherPatterns(fbPair.ditherPatterns);
 
@@ -581,6 +595,16 @@ namespace RT64 {
             // Synchronization will be required unless direct reinterpretation is possible (which is not implemented yet).
             if (colorImg.formatChanged || depthImg.formatChanged) {
                 fbPair.syncRequired = true;
+            }
+
+            if (fbPair.syncRequired && (std::getenv("RT64_DKR_FB_OVERLAP_LOG") != nullptr)) {
+                static uint32_t syncLogCount = 0;
+                if (syncLogCount++ < 512) {
+                    std::fprintf(stderr,
+                        "[RT64] fbPair %d sync: colorFmtChg=%d addr=%06X w=%u siz=%u | depthFmtChg=%d addr=%06X | reason=%d\n",
+                        fbPairIndex, int(colorImg.formatChanged), colorImg.address, colorImg.width, unsigned(colorImg.siz),
+                        int(depthImg.formatChanged), depthImg.address, int(flushReason));
+                }
             }
 
             uint32_t colorFbBytes = colorFb->imageRowBytes(colorWriteWidth) * colorFb->height;
@@ -1105,7 +1129,8 @@ namespace RT64 {
 
                     // Submit the shader to the cache so compilation can start right away.
                     // Ignore any calls that use fill type, as they're emulated without using a shader.
-                    if (callDesc.otherMode.cycleType() != G_CYC_FILL) {
+                    if (!ext.workloadQueue->ubershadersOnly.load(std::memory_order_relaxed) &&
+                        (callDesc.otherMode.cycleType() != G_CYC_FILL)) {
                         ext.rasterShaderCache->submit(shaderDesc);
                     }
 
@@ -1180,6 +1205,9 @@ namespace RT64 {
                     const auto &colorImg = fbPair.colorImage;
                     const auto &depthImg = fbPair.depthImage;
                     colorHeight = fbPair.drawColorRect.bottom(true);
+                    if (rsp->DKR.force8MBAddressMask && (colorImg.width == 320)) {
+                        colorHeight = std::min(colorHeight, 240U);
+                    }
                     colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
                     depthWriteWidth = 0;
                     colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
@@ -1200,6 +1228,13 @@ namespace RT64 {
                     if (depthWriteWidth > 0) {
                         depthRowStart = fbPair.drawDepthRect.top(false);
                         depthRowEnd = fbPair.drawDepthRect.bottom(true);
+                    }
+
+                    if (rsp->DKR.force8MBAddressMask && (colorImg.width == 320)) {
+                        colorRowStart = std::min(colorRowStart, 240U);
+                        colorRowEnd = std::min(colorRowEnd, 240U);
+                        depthRowStart = std::min(depthRowStart, 240U);
+                        depthRowEnd = std::min(depthRowEnd, 240U);
                     }
 
                     return true;
@@ -2782,6 +2817,9 @@ namespace RT64 {
     }
 
     uint8_t *State::fromRDRAM(uint32_t rdramAddress) const {
+        if ((rsp != nullptr) && rsp->DKR.force8MBAddressMask) {
+            rdramAddress &= 0x007FFFFFU;
+        }
         return &RDRAM[rdramAddress];
     }
 

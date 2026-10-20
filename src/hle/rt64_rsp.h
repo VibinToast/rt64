@@ -188,6 +188,22 @@ namespace RT64 {
         std::array<uint32_t, RSP_MAX_SEGMENTS> segments;
 
         struct {
+            std::array<hlslpp::float4x4, 3> matrices;
+            std::array<uint32_t, 3> segmentedAddresses;
+            std::array<uint32_t, 3> physicalAddresses;
+            uint32_t matrixOffset;
+            uint32_t vertexOffset;
+            uint32_t textureOffset;
+            uint32_t textureShift;
+            uint32_t textureCount;
+            std::bitset<RSP_MAX_VERTICES> loadedVertices;
+            uint8_t activeMatrix;
+            uint8_t vertexCursor;
+            bool billboard;
+            bool force8MBAddressMask;
+        } DKR;
+
+        struct {
             // Storage for struct data loaded by S2D commands.
             std::array<uint8_t, 256> struct_buffer;
             // Status tracking for sid/mask/flag.
@@ -241,6 +257,13 @@ namespace RT64 {
         void matrixCommon(const hlslpp::float4x4 &floatMatrix, uint32_t address, uint8_t params);
         void matrix(uint32_t address, uint8_t params);
         void matrixFloat(uint32_t address, uint8_t params);
+        void matrixDKR(uint32_t address, uint8_t index);
+        void selectMatrixDKR(uint8_t index);
+        void setBillboardDKR(bool enabled);
+        void setDMAOffsetsDKR(uint32_t matrixOffset, uint32_t vertexOffset);
+        void setDMATextureOffsetDKR(uint32_t address);
+        uint32_t textureImageAddressDKR(uint8_t fmt, uint32_t address);
+        void loadBlockDKR(uint16_t lrs);
         void popMatrix(uint32_t count);
         void pushProjectionMatrix();
         void popProjectionMatrix();
@@ -252,6 +275,7 @@ namespace RT64 {
         void specialComputeModelViewProj();
         void setModelViewProjChanged(bool changed);
         void setVertex(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
+        void setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t sourceOffset, bool append);
         void setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexEXV1(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexColorPD(uint32_t address);

@@ -4,6 +4,8 @@
 
 #include "rt64_raster_shader_cache.h"
 
+#include <cstdlib>
+
 #include "common/rt64_thread.h"
 
 #define ENABLE_OPTIMIZED_SHADER_GENERATION
@@ -43,6 +45,7 @@ namespace RT64 {
             {
                 std::unique_lock<std::mutex> queueLock(shaderCache->descQueueMutex);
                 shaderCache->descQueueActiveCount--;
+                shaderCache->descQueueChanged.notify_all();
                 shaderCache->descQueueChanged.wait(queueLock, [this]() {
                     return !threadRunning || !shaderCache->descQueue.empty();
                 });
@@ -109,9 +112,30 @@ namespace RT64 {
         if (shaderFormat == RenderShaderFormat::SPIRV) {
             optimizerCacheSPIRV.initialize();
         }
+
+        // Diagnostic capture is opt-in and contains only renderer state, never
+        // textures, display lists, or ROM data. It is used to produce a small
+        // deterministic preload table for scenes that are expensive on Deck.
+        const char *capturePath = std::getenv("RT64_DKR_SHADER_CAPTURE");
+        if ((capturePath != nullptr) && (capturePath[0] != '\0')) {
+            shaderCapture.open(capturePath, std::ios::out | std::ios::trunc);
+        }
+    }
+
+    void RasterShaderCache::setCompilationEnabled(bool enabled) {
+        compilationEnabled.store(enabled, std::memory_order_release);
+
+        if (!enabled) {
+            std::unique_lock<std::mutex> queueLock(descQueueMutex);
+            descQueue = std::queue<ShaderDescription>();
+        }
     }
 
     void RasterShaderCache::submit(const ShaderDescription &desc) {
+        if (!compilationEnabled.load(std::memory_order_acquire)) {
+            return;
+        }
+
         {
             std::unique_lock<std::mutex> queueLock(submissionMutex);
 
@@ -123,6 +147,15 @@ namespace RT64 {
             }
 
             found = true;
+
+            if (shaderCapture.is_open()) {
+                shaderCapture << desc.colorCombiner.L << ' '
+                              << desc.colorCombiner.H << ' '
+                              << desc.otherMode.L << ' '
+                              << desc.otherMode.H << ' '
+                              << desc.flags.value << '\n';
+                shaderCapture.flush();
+            }
         }
 
         // Push a new shader compilation to the queue.
@@ -135,16 +168,10 @@ namespace RT64 {
     }
     
     void RasterShaderCache::waitForAll() {
-        {
-            std::unique_lock<std::mutex> queueLock(descQueueMutex);
-            descQueue = std::queue<ShaderDescription>();
-        }
-
-        bool keepWaiting = false;
-        do {
-            std::unique_lock<std::mutex> queueLock(descQueueMutex);
-            keepWaiting = (descQueueActiveCount > 0);
-        } while (keepWaiting);
+        std::unique_lock<std::mutex> queueLock(descQueueMutex);
+        descQueueChanged.wait(queueLock, [this]() {
+            return descQueue.empty() && (descQueueActiveCount == 0);
+        });
     }
 
     void RasterShaderCache::destroyAll() {

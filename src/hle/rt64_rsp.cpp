@@ -4,6 +4,7 @@
 
 #include "rt64_rsp.h"
 
+#include <algorithm>
 #include <cassert>
 
 #include "../include/rt64_extended_gbi.h"
@@ -90,6 +91,19 @@ namespace RT64 {
         geometryModeStack[0] = G_CLIPPING;
         fogChanged = true;
         lookAtChanged = true;
+        DKR.matrices.fill(hlslpp::float4x4::identity());
+        DKR.segmentedAddresses.fill(0);
+        DKR.physicalAddresses.fill(0);
+        DKR.matrixOffset = 0;
+        DKR.vertexOffset = 0;
+        DKR.textureOffset = 0;
+        DKR.textureShift = 0;
+        DKR.textureCount = 0;
+        DKR.loadedVertices.reset();
+        DKR.activeMatrix = 0;
+        DKR.vertexCursor = 0;
+        DKR.billboard = false;
+        DKR.force8MBAddressMask = false;
 
         clearExtended();
     }
@@ -98,7 +112,10 @@ namespace RT64 {
 
     // Masks addresses as the RSP DMA hardware would.
     template<uint32_t mask> uint32_t RSP::maskPhysicalAddress(uint32_t address) {
-        if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
+        if (DKR.force8MBAddressMask) {
+            return address & mask & 0x007FFFFFU;
+        }
+        else if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
             return address - ExtendedMask;
         }
         else {
@@ -108,7 +125,7 @@ namespace RT64 {
 
     // Performs a lookup in the segment table to convert the given address.
     uint32_t RSP::fromSegmented(uint32_t segAddress) {
-        if (state->extended.extendRDRAM && ((segAddress & ExtendedMask) == ExtendedMask)) {
+        if (!DKR.force8MBAddressMask && state->extended.extendRDRAM && ((segAddress & ExtendedMask) == ExtendedMask)) {
             return segAddress;
         }
         else {
@@ -205,6 +222,130 @@ namespace RT64 {
         );
 
         matrixCommon(floatMatrix, address, params);
+    }
+
+    void RSP::matrixDKR(uint32_t address, uint8_t index) {
+        if (index >= DKR.matrices.size()) {
+            assert(false && "F3DDKR matrix index is invalid.");
+            return;
+        }
+
+        const uint32_t rdramAddress = maskPhysicalAddress<0x00FFFFF8>(DKR.matrixOffset + fromSegmented(address));
+        const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
+        DKR.matrices[index] = fixedMatrix->toMatrix4x4();
+        DKR.segmentedAddresses[index] = address;
+        DKR.physicalAddresses[index] = rdramAddress;
+        selectMatrixDKR(index);
+    }
+
+    void RSP::selectMatrixDKR(uint8_t index) {
+        if (index >= DKR.matrices.size()) {
+            assert(false && "F3DDKR matrix index is invalid.");
+            return;
+        }
+
+        DKR.activeMatrix = index;
+        modelMatrixStackSize = 1;
+        modelMatrixStack[0] = DKR.matrices[index];
+        modelMatrixSegmentedAddressStack[0] = DKR.segmentedAddresses[index];
+        modelMatrixPhysicalAddressStack[0] = DKR.physicalAddresses[index];
+
+        // F3DDKR supplies complete model-view-projection matrices from a heap
+        // whose slots are reused for different racer parts between frames.
+        // Cross-frame transform matching therefore stretches body geometry
+        // between unrelated matrices. Keep these transforms current-frame-only;
+        // the game still advances them at its native update rate.
+        TransformGroup &group = extended.modelMatrixIdStack[0];
+        group.matrixId = G_EX_ID_IGNORE;
+        group.decompose = false;
+        group.positionInterpolation = G_EX_COMPONENT_SKIP;
+        group.rotationInterpolation = G_EX_COMPONENT_SKIP;
+        group.scaleInterpolation = G_EX_COMPONENT_SKIP;
+        group.skewInterpolation = G_EX_COMPONENT_SKIP;
+        group.perspectiveInterpolation = G_EX_COMPONENT_SKIP;
+        // Also skip tile interpolation: with the default AUTO, every pair of
+        // hash-identical draw calls (hundreds per frame in DKR's wave
+        // renderer) enters the frame-matcher's quadratic tile-matching loop,
+        // which stalls the workload thread for the entire frame.
+        group.tileInterpolation = G_EX_COMPONENT_SKIP;
+        group.ordering = G_EX_ORDER_LINEAR;
+        extended.modelMatrixIdStackChanged = true;
+
+        // F3DDKR matrices are complete MVP matrices. Treat them as the model
+        // transform and keep RT64's view/projection side at identity. Do not
+        // invalidate an already-identity projection on every matrix switch:
+        // racer meshes intentionally draw triangles across a base load under
+        // matrix 1 and an append load under matrix 2. Creating a new projection
+        // for the append makes those vertices use a different view-projection
+        // index, and only the draw-bearing later projection is aspect-adjusted.
+        // That stretches the mixed seam triangles in widescreen mode.
+        const uint32_t projectionStackIndex = projectionMatrixStackSize - 1;
+        const bool resetProjectionToIdentity =
+            !isMatrixIdentity(viewMatrixStack[projectionStackIndex]) ||
+            !isMatrixIdentity(projMatrixStack[projectionStackIndex]) ||
+            !isMatrixIdentity(viewProjMatrixStack[projectionStackIndex]);
+        if (resetProjectionToIdentity) {
+            viewMatrixStack[projectionStackIndex] = hlslpp::float4x4::identity();
+            projMatrixStack[projectionStackIndex] = hlslpp::float4x4::identity();
+            viewProjMatrixStack[projectionStackIndex] = hlslpp::float4x4::identity();
+            projectionMatrixChanged = true;
+            projectionMatrixInversed = false;
+        }
+
+        modelViewProjChanged = true;
+    }
+
+    void RSP::setBillboardDKR(bool enabled) {
+        DKR.billboard = enabled;
+    }
+
+    void RSP::setDMAOffsetsDKR(uint32_t matrixOffset, uint32_t vertexOffset) {
+        // The microcode's offset moveword only updates the segment table in
+        // DMEM; the vertex cursor (0x14C) and the transformed vertex slots
+        // are untouched.
+        DKR.matrixOffset = matrixOffset;
+        DKR.vertexOffset = vertexOffset;
+    }
+
+    void RSP::setDMATextureOffsetDKR(uint32_t address) {
+        DKR.textureOffset = maskPhysicalAddress<0x00FFFFF8>(fromSegmented(address));
+        DKR.textureShift = 0;
+        DKR.textureCount = 0;
+    }
+
+    uint32_t RSP::textureImageAddressDKR(uint8_t fmt, uint32_t address) {
+        uint32_t physicalAddress = maskPhysicalAddress<0x00FFFFFF>(fromSegmented(address));
+        if (DKR.textureOffset != 0) {
+            if (fmt == G_IM_FMT_RGBA) {
+                const uint32_t shiftAddress = DKR.textureOffset + DKR.textureCount * sizeof(uint16_t);
+                DKR.textureShift = *reinterpret_cast<const uint16_t *>(state->fromRDRAM(shiftAddress ^ 0x2));
+                physicalAddress += DKR.textureShift;
+            }
+            else {
+                DKR.textureOffset = 0;
+                DKR.textureShift = 0;
+                DKR.textureCount = 0;
+            }
+        }
+
+        return physicalAddress;
+    }
+
+    void RSP::loadBlockDKR(uint16_t lrs) {
+        if (DKR.textureOffset == 0) {
+            return;
+        }
+
+        const uint32_t blockBytes = (((lrs >> 2) + 1) << 3);
+        if ((blockBytes != 0) && ((DKR.textureShift % blockBytes) != 0)) {
+            state->rdp->texture.address -= DKR.textureShift;
+            DKR.textureOffset = 0;
+            DKR.textureShift = 0;
+            DKR.textureCount = 0;
+        }
+        else {
+            DKR.textureCount++;
+        }
     }
 
     void RSP::popMatrix(uint32_t count) {
@@ -374,6 +515,93 @@ namespace RT64 {
         const Vertex *dlVerts = reinterpret_cast<const Vertex *>(state->fromRDRAM(rdramAddress));
         memcpy(&vertices[dstIndex], dlVerts, sizeof(Vertex) * vtxCount);
         setVertexCommon<true, sizeof(Vertex)>(rdramAddress, dstIndex, dstIndex + vtxCount);
+    }
+
+    void RSP::setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t sourceOffset, bool append) {
+        // Microcode-verified placement rule (DMEM 0x14C cursor): a non-append
+        // load always writes to slot 0 and sets the cursor to its count; an
+        // append load writes to the cursor and leaves it unchanged. This is
+        // how racer models stitch body (matrix 1) and head/tail (matrix 2)
+        // vertices contiguously, and how sprites reuse slots 1..n across
+        // triangle batches while slot 0 keeps the anchor vertex.
+        uint32_t dstIndex;
+        if (!append) {
+            dstIndex = 0;
+            DKR.vertexCursor = uint8_t(vtxCount);
+        }
+        else {
+            dstIndex = DKR.vertexCursor;
+        }
+
+        // DMEM vertex slots persist across batches on hardware, and DKR's
+        // larger models rely on it: triangle batches reference seam vertices
+        // loaded by a previous batch that were never re-uploaded. The
+        // validity bits therefore only accumulate; they guard against slots
+        // that were never written since the task started.
+
+        if ((dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
+            assert(false && "F3DDKR vertex indices are not valid.");
+            return;
+        }
+
+        const uint32_t rdramAddress = maskPhysicalAddress<0x00FFFFF8>(DKR.vertexOffset + fromSegmented(address)) + sourceOffset;
+        for (uint32_t i = 0; i < vtxCount; i++) {
+            const uint32_t src = rdramAddress + i * 10;
+            Vertex &dst = vertices[dstIndex + i];
+            dst.x = *reinterpret_cast<const int16_t *>(state->fromRDRAM(src ^ 0x2));
+            dst.y = *reinterpret_cast<const int16_t *>(state->fromRDRAM((src + 2) ^ 0x2));
+            dst.z = *reinterpret_cast<const int16_t *>(state->fromRDRAM((src + 4) ^ 0x2));
+            dst.flag = 0;
+            dst.s = 0;
+            dst.t = 0;
+            dst.color.r = *state->fromRDRAM((src + 6) ^ 0x3);
+            dst.color.g = *state->fromRDRAM((src + 7) ^ 0x3);
+            dst.color.b = *state->fromRDRAM((src + 8) ^ 0x3);
+            dst.color.a = *state->fromRDRAM((src + 9) ^ 0x3);
+        }
+
+        // F3DDKR billboards transform vertex zero with the regular MVP, then
+        // add its clip-space position to every appended billboard vertex. Add
+        // that anchor to the translation row so both RT64's CPU bookkeeping
+        // and the GPU world transform reproduce the microcode operation.
+        const hlslpp::float4x4 unanchoredMatrix = modelMatrixStack[0];
+        bool anchoredBillboard = false;
+
+        // F3DDKR intentionally permits a triangle to span vertices loaded
+        // under matrix 1 and vertices appended under matrix 2. RT64 already
+        // records a world-transform index per vertex, so keeping each load in
+        // its original coordinate space reproduces the microcode directly.
+        // Transforming the appended vertices on the CPU and quantizing them
+        // back to int16 corrupts exactly the mixed head/tail seam triangles
+        // used by close-range racer models.
+
+        if (append && DKR.billboard) {
+            const int workloadCursor = state->ext.workloadQueue->writeCursor;
+            Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+            const uint32_t anchorIndex = indices[0];
+            if (anchorIndex < workload.drawData.posTransformed.size()) {
+                modelMatrixStack[0][3] += workload.drawData.posTransformed[anchorIndex];
+                // Keep the anchor's clip-space W for RT64's matrix-based
+                // billboard emulation. Adding the local W term here creates
+                // huge screen-space primitives and pathological overdraw.
+                modelMatrixStack[0][3].w = workload.drawData.posTransformed[anchorIndex].w;
+                modelViewProjChanged = true;
+                anchoredBillboard = true;
+            }
+        }
+
+        setVertexCommon<true, 10>(rdramAddress, dstIndex, dstIndex + vtxCount);
+
+        for (uint32_t i = dstIndex; i < (dstIndex + vtxCount); i++) {
+            DKR.loadedVertices.set(i);
+        }
+
+        if (anchoredBillboard) {
+            modelMatrixStack[0] = unanchoredMatrix;
+            modelMatrixSegmentedAddressStack[0] = DKR.segmentedAddresses[DKR.activeMatrix];
+            modelMatrixPhysicalAddressStack[0] = DKR.physicalAddresses[DKR.activeMatrix];
+            modelViewProjChanged = true;
+        }
     }
     
     void RSP::setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex) {
@@ -760,28 +988,58 @@ namespace RT64 {
             auto &worldIndices = workload.drawData.worldIndices;
             auto &posTransformed = workload.drawData.posTransformed;
             const uint32_t newIndex = workload.drawData.vertexCount();
-            posFloats.emplace_back(posFloats[globalIndex * 3 + 0]);
-            posFloats.emplace_back(posFloats[globalIndex * 3 + 1]);
-            posFloats.emplace_back(posFloats[globalIndex * 3 + 2]);
-            velFloats.emplace_back(velFloats[globalIndex * 3 + 0]);
-            velFloats.emplace_back(velFloats[globalIndex * 3 + 1]);
-            velFloats.emplace_back(velFloats[globalIndex * 3 + 2]);
-            normColBytes.emplace_back(normColBytes[globalIndex * 4 + 0]);
-            normColBytes.emplace_back(normColBytes[globalIndex * 4 + 1]);
-            normColBytes.emplace_back(normColBytes[globalIndex * 4 + 2]);
-            normColBytes.emplace_back(normColBytes[globalIndex * 4 + 3]);
-            tcFloats.emplace_back(tcFloats[globalIndex * 2 + 0]);
-            tcFloats.emplace_back(tcFloats[globalIndex * 2 + 1]);
-            tcVelFloats.emplace_back(tcVelFloats[globalIndex * 2 + 0]);
-            tcVelFloats.emplace_back(tcVelFloats[globalIndex * 2 + 1]);
-            viewProjIndices.emplace_back(viewProjIndices[globalIndex]);
-            worldIndices.emplace_back(worldIndices[globalIndex]);
-            fogIndices.emplace_back(fogIndices[globalIndex]);
-            lightIndices.emplace_back(lightIndices[globalIndex]);
-            lightCounts.emplace_back(lightCounts[globalIndex]);
-            lookAtIndices.emplace_back(lookAtIndices[globalIndex]);
-            posTransformed.emplace_back(posTransformed[globalIndex]);
-            posScreen.emplace_back(posScreen[globalIndex]);
+
+            // Copy every attribute into locals before appending: passing a
+            // reference to a vector's own element to emplace_back is undefined
+            // behavior when the append reallocates, and this path runs
+            // thousands of times per frame for F3DDKR's per-triangle ST
+            // rewrites. The dangling reads produced deterministic garbage
+            // positions on models with many shared vertices.
+            const float px = posFloats[globalIndex * 3 + 0];
+            const float py = posFloats[globalIndex * 3 + 1];
+            const float pz = posFloats[globalIndex * 3 + 2];
+            const float vx = velFloats[globalIndex * 3 + 0];
+            const float vy = velFloats[globalIndex * 3 + 1];
+            const float vz = velFloats[globalIndex * 3 + 2];
+            const uint8_t nc0 = normColBytes[globalIndex * 4 + 0];
+            const uint8_t nc1 = normColBytes[globalIndex * 4 + 1];
+            const uint8_t nc2 = normColBytes[globalIndex * 4 + 2];
+            const uint8_t nc3 = normColBytes[globalIndex * 4 + 3];
+            const float tcS = tcFloats[globalIndex * 2 + 0];
+            const float tcT = tcFloats[globalIndex * 2 + 1];
+            const float tcVelS = tcVelFloats[globalIndex * 2 + 0];
+            const float tcVelT = tcVelFloats[globalIndex * 2 + 1];
+            const auto viewProjIndex = viewProjIndices[globalIndex];
+            const auto worldIndex = worldIndices[globalIndex];
+            const auto fogIndex = fogIndices[globalIndex];
+            const auto lightIndex = lightIndices[globalIndex];
+            const auto lightCount = lightCounts[globalIndex];
+            const auto lookAtIndex = lookAtIndices[globalIndex];
+            const auto transformedPos = posTransformed[globalIndex];
+            const auto screenPos = posScreen[globalIndex];
+
+            posFloats.emplace_back(px);
+            posFloats.emplace_back(py);
+            posFloats.emplace_back(pz);
+            velFloats.emplace_back(vx);
+            velFloats.emplace_back(vy);
+            velFloats.emplace_back(vz);
+            normColBytes.emplace_back(nc0);
+            normColBytes.emplace_back(nc1);
+            normColBytes.emplace_back(nc2);
+            normColBytes.emplace_back(nc3);
+            tcFloats.emplace_back(tcS);
+            tcFloats.emplace_back(tcT);
+            tcVelFloats.emplace_back(tcVelS);
+            tcVelFloats.emplace_back(tcVelT);
+            viewProjIndices.emplace_back(viewProjIndex);
+            worldIndices.emplace_back(worldIndex);
+            fogIndices.emplace_back(fogIndex);
+            lightIndices.emplace_back(lightIndex);
+            lightCounts.emplace_back(lightCount);
+            lookAtIndices.emplace_back(lookAtIndex);
+            posTransformed.emplace_back(transformedPos);
+            posScreen.emplace_back(screenPos);
             indices[dstIndex] = newIndex;
             used[dstIndex] = false;
             globalIndex = indices[dstIndex];
@@ -885,9 +1143,11 @@ namespace RT64 {
 
     void RSP::modifyGeometryMode(uint32_t offMask, uint32_t onMask) {
         uint32_t &geometryMode = geometryModeStack[geometryModeStackSize - 1];
-        geometryMode &= offMask;
-        geometryMode |= onMask;
-        state->updateDrawStatusAttribute(DrawAttribute::GeometryMode);
+        const uint32_t updatedGeometryMode = (geometryMode & offMask) | onMask;
+        if (updatedGeometryMode != geometryMode) {
+            geometryMode = updatedGeometryMode;
+            state->updateDrawStatusAttribute(DrawAttribute::GeometryMode);
+        }
     }
 
     void RSP::setObjRenderMode(uint32_t value) {

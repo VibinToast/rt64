@@ -31,7 +31,19 @@ namespace RT64 {
     FramebufferManager::~FramebufferManager() {}
 
     Framebuffer &FramebufferManager::get(uint32_t address, uint8_t siz, uint32_t width, uint32_t height) {
+        const bool isNew = (framebuffers.find(address) == framebuffers.end());
         auto &fb = framebuffers[address];
+        if (std::getenv("RT64_DKR_FB_OVERLAP_LOG") != nullptr) {
+            static uint32_t getLogCount = 0;
+            if (isNew && (getLogCount++ < 256)) {
+                std::fprintf(stderr, "[RT64] NEW fb entry %08X (this=%p, mapSize=%zu) w=%u siz=%u h=%u\n",
+                    address, static_cast<void *>(this), framebuffers.size(), width, unsigned(siz), height);
+            }
+            else if ((fb.width != 0) && ((fb.width != width) || (fb.siz != siz)) && (getLogCount++ < 256)) {
+                std::fprintf(stderr, "[RT64] fb %08X format flip: w %u->%u siz %u->%u h=%u\n",
+                    address, fb.width, width, unsigned(fb.siz), unsigned(siz), height);
+            }
+        }
         fb.widthChanged = (fb.width != width);
         fb.sizChanged = (fb.siz != siz);
 
@@ -188,6 +200,12 @@ namespace RT64 {
 
         auto fbIt = framebuffers.find(op.createTileCopy.address);
         assert(fbIt != framebuffers.end());
+        if (fbIt == framebuffers.end()) {
+            // The framebuffer was discarded after the operation was queued;
+            // recording against it would dereference invalid state.
+            return;
+        }
+
         RenderTargetKey colorTargetKey(fbIt->second.addressStart, fbIt->second.width, fbIt->second.siz, Framebuffer::Type::Color);
         RenderTarget &colorTarget = targetManager.get(colorTargetKey);
         if (tileCopy.readColorFromStorage) {
@@ -908,6 +926,15 @@ namespace RT64 {
         auto it = framebuffers.begin();
         while (it != framebuffers.end()) {
             if ((&it->second != changedFb) && (it->second.overlaps(addressStart, addressEnd))) {
+                if (std::getenv("RT64_DKR_FB_OVERLAP_LOG") != nullptr) {
+                    static uint32_t changeRAMLogCount = 0;
+                    if (changeRAMLogCount++ < 256) {
+                        std::fprintf(stderr,
+                            "[RT64] changeRAM: write [%06X,%06X) marks fb %06X (w=%u h=%u maxH=%u end=%06X) rdramChanged\n",
+                            addressStart, addressEnd, it->second.addressStart, it->second.width, it->second.height,
+                            it->second.maxHeight, it->second.addressEnd);
+                    }
+                }
                 it->second.rdramChanged = true;
             }
 
@@ -984,12 +1011,20 @@ namespace RT64 {
             beforeDiscardBarriers.clear();
 
             for (RenderTexture *texture : cmdListDiscards.cmdListDiscards) {
+                if (texture == nullptr) {
+                    continue;
+                }
+
                 beforeDiscardBarriers.emplace_back(RenderTextureBarrier(texture, RenderTextureLayout::COLOR_WRITE));
             }
 
             renderWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, beforeDiscardBarriers);
 
             for (RenderTexture *texture : cmdListDiscards.cmdListDiscards) {
+                if (texture == nullptr) {
+                    continue;
+                }
+
                 renderWorker->commandList->discardTexture(texture);
             }
         }
