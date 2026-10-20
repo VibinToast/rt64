@@ -5,7 +5,11 @@
 #include "rt64_rsp.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "../include/rt64_extended_gbi.h"
 #include "common/rt64_common.h"
@@ -15,6 +19,94 @@
 
 #include "rt64_interpreter.h"
 #include "rt64_state.h"
+
+// JFG PORT: the game tags the model matrices it writes (src/jfg/jfg_interpolation.cpp): the matrix's RDRAM address, an
+// ID for the object (0 = none), a check value of the 64 bytes written, and the float model matrix the game multiplied
+// with the camera to make them. The matrix heap is reused every other frame and not every matrix is tagged, so a tag
+// only counts while the matrix at that address still has those bytes.
+namespace {
+    struct JfgMatrixTag {
+        std::atomic<uint32_t> address{ 0 };
+        std::atomic<uint32_t> id{ 0 };
+        std::atomic<uint32_t> check{ 0 };
+        std::atomic<uint32_t> sequence{ 0 }; // odd while the tag is being written
+        float model[16] = {};
+    };
+
+    JfgMatrixTag jfgMatrixTags[1 << 14];
+
+    JfgMatrixTag &jfgMatrixTagFor(uint32_t address) {
+        return jfgMatrixTags[(address >> 6) & ((1 << 14) - 1)];
+    }
+}
+
+uint32_t rt64_jfg_matrix_check(const uint8_t *rdram, uint32_t address) {
+    uint32_t hash = 2166136261u; // FNV-1a over the fixed-point matrix (64 bytes)
+    for (uint32_t i = 0; i < 64; i++) {
+        hash = (hash ^ rdram[(address + i) & 0x00FFFFFF]) * 16777619u;
+    }
+
+    return hash;
+}
+
+void rt64_jfg_tag_matrix(uint32_t address, uint32_t id, uint32_t check, const float *model) {
+    JfgMatrixTag &tag = jfgMatrixTagFor(address);
+    tag.sequence.fetch_add(1, std::memory_order_acq_rel);
+    tag.address.store(0, std::memory_order_relaxed);
+    tag.id.store(id, std::memory_order_relaxed);
+    tag.check.store(check, std::memory_order_relaxed);
+    std::memcpy(tag.model, model, sizeof(tag.model));
+    tag.address.store(address, std::memory_order_relaxed);
+    tag.sequence.fetch_add(1, std::memory_order_release);
+}
+
+// The tag's model matrix, if the tag is for this address and was not being rewritten while it was read.
+static bool jfgMatrixModel(uint32_t address, hlslpp::float4x4 &model) {
+    const JfgMatrixTag &tag = jfgMatrixTagFor(address);
+    const uint32_t before = tag.sequence.load(std::memory_order_acquire);
+    if ((before & 1) || (tag.address.load(std::memory_order_relaxed) != address)) {
+        return false;
+    }
+
+    float m[16];
+    std::memcpy(m, tag.model, sizeof(m));
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (tag.sequence.load(std::memory_order_relaxed) != before) {
+        return false;
+    }
+
+    model = hlslpp::float4x4(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+    return true;
+}
+
+// The tag's ID, and its model matrix in model (hasModel), for a slot load from this address.
+static uint32_t jfgMatrixId(const uint8_t *rdram, uint32_t address, hlslpp::float4x4 &model, bool &hasModel) {
+    hasModel = false;
+    // Debug aid: RT64_INTERP_TRACE=1 also counts how slot loads found their tag.
+    static const bool trace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+    static uint32_t loads = 0, untagged = 0, changed = 0, tagged = 0, notObject = 0;
+    if (trace && (++loads % 2000) == 0) {
+        fprintf(stderr, "[INTERP] matrix loads: tag with an ID %u, tagged 0 %u, no tag %u, bytes changed %u\n", tagged, notObject, untagged, changed);
+        tagged = notObject = untagged = changed = 0;
+    }
+
+    const JfgMatrixTag &tag = jfgMatrixTagFor(address);
+    if (tag.address.load(std::memory_order_acquire) != address) {
+        untagged++;
+        return 0;
+    }
+
+    const uint32_t id = tag.id.load(std::memory_order_relaxed);
+    const uint32_t check = tag.check.load(std::memory_order_relaxed);
+    if (check != rt64_jfg_matrix_check(rdram, address)) {
+        changed++;
+        return 0;
+    }
+
+    (id != 0) ? tagged++ : notObject++;
+    hasModel = jfgMatrixModel(address, model);
+    return id;
+}
 
 //#define LOG_SPECIAL_MATRIX_OPERATIONS
 
@@ -103,6 +195,10 @@ namespace RT64 {
         DKR.activeMatrix = 0;
         DKR.vertexCursor = 0;
         DKR.billboard = false;
+        DKR.jfgSplit = false; // JFG PORT
+        DKR.jfgIds.fill(0);
+        DKR.jfgHasModel.fill(false);
+        DKR.jfgObjectId = 0;
         DKR.force8MBAddressMask = false;
         DKR.jfg = false;
 
@@ -225,6 +321,19 @@ namespace RT64 {
         matrixCommon(floatMatrix, address, params);
     }
 
+    // JFG PORT: exact comparison, so an unchanged camera does not start a new projection.
+    static bool matricesEqual(const hlslpp::float4x4 &a, const hlslpp::float4x4 &b) {
+        for (int r = 0; r < 4; r++) {
+            for (int c = 0; c < 4; c++) {
+                if (a[r][c] != b[r][c]) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     void RSP::matrixDKR(uint32_t address, uint8_t index) {
         if (index >= DKR.matrices.size()) {
             assert(false && "F3DDKR matrix index is invalid.");
@@ -254,7 +363,116 @@ namespace RT64 {
         DKR.matrices[dst] = (param & 0x80) ? hlslpp::mul(loaded, DKR.matrices[src]) : loaded;
         DKR.segmentedAddresses[dst] = address;
         DKR.physicalAddresses[dst] = rdramAddress;
+        // The ID that lets RT64 match this matrix to the same one in the frame before: an object's model matrix as
+        // the game tagged it, or a bone multiplied onto one (the parent's ID with the bone's place in its buffer).
+        // The exact model matrix comes with the tag too (a bone: multiplied onto its parent's), so the model matrix
+        // does not have to be worked out from the fixed-point result, which differs a little every frame.
+        if (dst == 0) {
+            DKR.jfgIds[0] = 0;
+            DKR.jfgHasModel[0] = false;
+        }
+        else if (param & 0x80) {
+            // A model's bones (the game's animation matrices) are world-space model matrices multiplied onto the camera
+            // in slot 0, so the loaded matrix is the bone's exact model matrix. Its ID: the object drawn now (its own
+            // matrix was the last tagged load) with the bone's place in its buffer.
+            const bool ontoCamera = (src == 0);
+            const uint32_t parentId = ontoCamera ? DKR.jfgObjectId : DKR.jfgIds[src];
+            const uint32_t boneId = parentId ? ((parentId * 2654435761u) ^ ((address & 0x00FFFFFFu) >> 6) * 40503u) : 0;
+            DKR.jfgIds[dst] = ((boneId == G_EX_ID_IGNORE) || (boneId == G_EX_ID_AUTO)) ? 0 : boneId;
+            DKR.jfgHasModel[dst] = ontoCamera || DKR.jfgHasModel[src];
+            if (ontoCamera) {
+                DKR.jfgModels[dst] = loaded;
+            }
+            else if (DKR.jfgHasModel[dst]) {
+                DKR.jfgModels[dst] = hlslpp::mul(loaded, DKR.jfgModels[src]);
+            }
+        }
+        else {
+            bool hasModel = false;
+            DKR.jfgIds[dst] = jfgMatrixId(state->fromRDRAM(0), rdramAddress, DKR.jfgModels[dst], hasModel);
+            DKR.jfgHasModel[dst] = hasModel;
+            DKR.jfgObjectId = DKR.jfgIds[dst];
+        }
+
+        // Debug aid (RT64_INTERP_TRACE): the kinds of matrix loads.
+        static const bool loadTrace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+        if (loadTrace) {
+            static uint32_t kinds[6] = {}, total = 0;
+            const int kind = (dst == 0) ? 0 : (param & 0x80) ? ((DKR.jfgIds[dst] != 0) ? 1 : 2) : ((DKR.jfgIds[dst] != 0) ? 3 : 4);
+            kinds[kind]++;
+            kinds[5] += (dst != 0 && (param & 0x80) && src != 1) ? 1 : 0;
+            static uint32_t pairs[8][8] = {};
+            if (param & 0x80) pairs[src][dst]++;
+            if (((total + 1) % 3000) == 0) {
+                for (int s = 0; s < 8; s++) for (int t = 0; t < 8; t++) if (pairs[s][t]) fprintf(stderr, "[INTERP] multiply %d -> %d: %u\n", s, t, pairs[s][t]);
+                memset(pairs, 0, sizeof(pairs));
+            }
+            if ((++total % 3000) == 0) {
+                fprintf(stderr, "[INTERP] slot loads: camera %u, bone with ID %u, bone without %u, load with ID %u, load without %u (bones not onto slot 1: %u)\n",
+                    kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], kinds[5]);
+                memset(kinds, 0, sizeof(kinds));
+            }
+        }
+
+        if (dst == 0) {
+            setCameraJFG(DKR.matrices[0]);
+        }
+
         selectMatrixDKR(dst);
+    }
+
+    // JFG PORT: slot 0 was loaded. A perspective camera has a w column that depends on position (the game's
+    // guPerspectiveF); the HUD's orthographic matrix has (0, 0, 0, k) there and cannot be inverted, so it is not split.
+    // RT64's isMatrixViewProj() is not used: it accepts that orthographic matrix too (its [3][3] is 160).
+    void RSP::setCameraJFG(const hlslpp::float4x4 &viewProj) {
+        static const bool splitDisabled = (std::getenv("RT64_JFG_NO_SPLIT") != nullptr); // debug aid: the old behaviour
+        const float wDepends = std::abs(viewProj[0][3]) + std::abs(viewProj[1][3]) + std::abs(viewProj[2][3]);
+        DKR.jfgSplit = false;
+        if (splitDisabled || (wDepends < 1e-6f)) {
+            return;
+        }
+
+        const hlslpp::float4x4 inverse = hlslpp::inverse(viewProj);
+        if (matrixIsNaN(inverse)) {
+            return;
+        }
+
+        // The camera is view x projection with a rigid view and the projection of guPerspectiveF (x and y scale, a z
+        // mapping, w = -z), so (row vectors, VP = V * P): VP column 0 = V column 0 * sx, column 1 = V column 1 * sy,
+        // column 3 = V column 2 * -k, and column 2 = V column 2 * a + (0, 0, 0, b). This is solved from whole columns;
+        // RT64's matrixDecomposeViewProj divides by single elements, which are 0 when the camera looks along an axis.
+        auto length3 = [](float x, float y, float z) { return std::sqrt(x * x + y * y + z * z); };
+        const float sx = length3(viewProj[0][0], viewProj[1][0], viewProj[2][0]);
+        const float sy = length3(viewProj[0][1], viewProj[1][1], viewProj[2][1]);
+        const float k = length3(viewProj[0][3], viewProj[1][3], viewProj[2][3]);
+        if ((sx < 1e-6f) || (sy < 1e-6f) || (k < 1e-6f)) {
+            return;
+        }
+
+        hlslpp::float4x4 view = hlslpp::float4x4::identity();
+        hlslpp::float4x4 proj(0.0f);
+        for (int r = 0; r < 4; r++) {
+            view[r][0] = viewProj[r][0] / sx;
+            view[r][1] = viewProj[r][1] / sy;
+            view[r][2] = -viewProj[r][3] / k;
+            view[r][3] = (r == 3) ? 1.0f : 0.0f;
+        }
+
+        const float a = viewProj[0][2] * view[0][2] + viewProj[1][2] * view[1][2] + viewProj[2][2] * view[2][2];
+        proj[0][0] = sx;
+        proj[1][1] = sy;
+        proj[2][2] = a;
+        proj[2][3] = -k;
+        proj[3][2] = viewProj[3][2] - view[3][2] * a;
+        if (matrixIsNaN(view) || matrixIsNaN(proj)) {
+            return;
+        }
+
+        DKR.jfgViewProj = viewProj;
+        DKR.jfgInvViewProj = inverse;
+        DKR.jfgView = view;
+        DKR.jfgProj = proj;
+        DKR.jfgSplit = true;
     }
 
     void RSP::selectMatrixDKR(uint8_t index) {
@@ -265,7 +483,44 @@ namespace RT64 {
 
         DKR.activeMatrix = index;
         modelMatrixStackSize = 1;
-        modelMatrixStack[0] = DKR.matrices[index];
+        const bool jfgSplit = DKR.jfg && DKR.jfgSplit; // JFG PORT: see setCameraJFG
+        if (jfgSplit && (index != 0) && DKR.jfgHasModel[index]) {
+            modelMatrixStack[0] = DKR.jfgModels[index];
+
+            // Debug aid (RT64_INTERP_TRACE): how far the model matrix worked out from the fixed-point result is off.
+            static const bool trace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+            if (trace) {
+                static float worst = 0.0f;
+                static uint32_t count = 0;
+                const hlslpp::float4x4 worked = hlslpp::mul(DKR.matrices[index], DKR.jfgInvViewProj);
+                for (int r = 0; r < 4; r++) {
+                    for (int c = 0; c < 4; c++) {
+                        worst = std::max(worst, std::abs(worked[r][c] - DKR.jfgModels[index][r][c]));
+                    }
+                }
+
+                if ((++count % 5000) == 0) {
+                    fprintf(stderr, "[INTERP] model worked out from the fixed-point matrix: largest difference %g\n", worst);
+                    worst = 0.0f;
+                }
+            }
+        }
+        else if (jfgSplit) {
+            modelMatrixStack[0] = (index == 0) ? hlslpp::float4x4::identity() : hlslpp::mul(DKR.matrices[index], DKR.jfgInvViewProj);
+
+            // A model matrix has no perspective part: what the inverse leaves in column 3 is rounding. Exact zeros and
+            // one there keep RT64 from treating the matrix as perspective (decomposing it for interpolation fails).
+            hlslpp::float4x4 &model = modelMatrixStack[0];
+            if ((std::abs(model[0][3]) < 1e-3f) && (std::abs(model[1][3]) < 1e-3f) && (std::abs(model[2][3]) < 1e-3f) && (std::abs(model[3][3] - 1.0f) < 1e-3f)) {
+                model[0][3] = 0.0f;
+                model[1][3] = 0.0f;
+                model[2][3] = 0.0f;
+                model[3][3] = 1.0f;
+            }
+        }
+        else {
+            modelMatrixStack[0] = DKR.matrices[index];
+        }
         modelMatrixSegmentedAddressStack[0] = DKR.segmentedAddresses[index];
         modelMatrixPhysicalAddressStack[0] = DKR.physicalAddresses[index];
 
@@ -288,6 +543,23 @@ namespace RT64 {
         // which stalls the workload thread for the entire frame.
         group.tileInterpolation = G_EX_COMPONENT_SKIP;
         group.ordering = G_EX_ORDER_LINEAR;
+
+        // JFG PORT: with the camera split off, a matrix the game tagged with its object (setCameraJFG, matrixJFG) is
+        // matched to the same object's matrix in the frame before by that ID, in the order they were drawn, so the
+        // heap reuse described above cannot pair unrelated objects.
+        static const bool jfgNoIds = (std::getenv("RT64_JFG_NO_IDS") != nullptr); // debug aid: the camera split without IDs
+        const uint32_t jfgId = (jfgSplit && !jfgNoIds) ? DKR.jfgIds[index] : 0;
+        if (jfgId != 0) {
+            // Blended as matrices (no decomposition): between two 60 fps frames an object moves and turns very little.
+            group.matrixId = jfgId;
+            group.decompose = false;
+            group.positionInterpolation = G_EX_COMPONENT_INTERPOLATE;
+            group.rotationInterpolation = G_EX_COMPONENT_INTERPOLATE;
+            group.scaleInterpolation = G_EX_COMPONENT_INTERPOLATE;
+            group.skewInterpolation = G_EX_COMPONENT_INTERPOLATE;
+            group.perspectiveInterpolation = G_EX_COMPONENT_SKIP;
+        }
+
         extended.modelMatrixIdStackChanged = true;
 
         // F3DDKR matrices are complete MVP matrices. Treat them as the model
@@ -299,6 +571,25 @@ namespace RT64 {
         // index, and only the draw-bearing later projection is aspect-adjusted.
         // That stretches the mixed seam triangles in widescreen mode.
         const uint32_t projectionStackIndex = projectionMatrixStackSize - 1;
+        if (jfgSplit) {
+            // JFG PORT: the camera is the projection for the whole viewport; it only changes when slot 0 is loaded again,
+            // so the seam triangles described above keep one view-projection index here too.
+            const bool cameraChanged =
+                !matricesEqual(viewProjMatrixStack[projectionStackIndex], DKR.jfgViewProj) ||
+                !matricesEqual(viewMatrixStack[projectionStackIndex], DKR.jfgView) ||
+                !matricesEqual(projMatrixStack[projectionStackIndex], DKR.jfgProj);
+            if (cameraChanged) {
+                viewMatrixStack[projectionStackIndex] = DKR.jfgView;
+                projMatrixStack[projectionStackIndex] = DKR.jfgProj;
+                viewProjMatrixStack[projectionStackIndex] = DKR.jfgViewProj;
+                projectionMatrixChanged = true;
+                projectionMatrixInversed = false;
+            }
+
+            modelViewProjChanged = true;
+            return;
+        }
+
         const bool resetProjectionToIdentity =
             !isMatrixIdentity(viewMatrixStack[projectionStackIndex]) ||
             !isMatrixIdentity(projMatrixStack[projectionStackIndex]) ||
@@ -621,11 +912,22 @@ namespace RT64 {
             Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
             const uint32_t anchorIndex = indices[0];
             if (anchorIndex < workload.drawData.posTransformed.size()) {
+                // JFG PORT: with the camera split off (setCameraJFG), the model matrix is slot x inverse(camera), so the
+                // clip-space anchor goes onto the slot's own matrix and the result is moved into model space again.
+                const bool jfgSplit = DKR.jfg && DKR.jfgSplit;
+                if (jfgSplit) {
+                    modelMatrixStack[0] = DKR.matrices[DKR.activeMatrix];
+                }
+
                 modelMatrixStack[0][3] += workload.drawData.posTransformed[anchorIndex];
                 // Keep the anchor's clip-space W for RT64's matrix-based
                 // billboard emulation. Adding the local W term here creates
                 // huge screen-space primitives and pathological overdraw.
                 modelMatrixStack[0][3].w = workload.drawData.posTransformed[anchorIndex].w;
+                if (jfgSplit) {
+                    modelMatrixStack[0] = hlslpp::mul(modelMatrixStack[0], DKR.jfgInvViewProj);
+                }
+
                 modelViewProjChanged = true;
                 anchoredBillboard = true;
             }
