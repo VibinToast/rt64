@@ -82,6 +82,15 @@ namespace RT64 {
         std::unique_ptr<RenderPipeline> postBlendDitherNoiseAddPipeline;
         std::unique_ptr<RenderPipeline> postBlendDitherNoiseSubPipeline;
         std::unique_ptr<RenderPipeline> postBlendDitherNoiseSubNegativePipeline;
+        std::unique_ptr<RenderPipeline> ssaoPipeline; // JFG PORT
+        std::unique_ptr<RenderPipeline> ssaoBlurPipeline; // JFG PORT: bloom layout
+        std::unique_ptr<RenderPipeline> fogPipeline; // JFG PORT
+        std::unique_ptr<RenderPipeline> vignettePipeline; // JFG PORT
+        std::unique_ptr<RenderPipelineLayout> bloomPipelineLayout; // JFG PORT
+        std::unique_ptr<RenderPipeline> bloomExtractPipeline;
+        std::unique_ptr<RenderPipeline> bloomBlurPipeline;
+        std::unique_ptr<RenderPipeline> bloomCompositePipeline;
+        static const RenderFormat BloomBufferFormat = RenderFormat::R16G16B16A16_FLOAT;
         std::mutex firstPipelineMutex;
         std::condition_variable firstPipelineCondition;
         bool pipelinesCreated = false;

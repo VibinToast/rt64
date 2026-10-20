@@ -41,6 +41,11 @@ namespace RT64 {
                 bool vertexTestZ : 1;
                 bool postBlendDitherNoise : 1;
                 bool postBlendDitherNoiseNegative : 1;
+                // JFG PORT: the draw's perspective projection, for the ambient occlusion pass (SsaoPS.hlsl): tan(half the vertical
+                // field of view), near and far plane. All 0 for orthographic and rectangle draws.
+                float jfgTanHalfFovY;
+                float jfgNear;
+                float jfgFar;
             } triangles;
 
             struct {

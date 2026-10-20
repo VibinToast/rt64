@@ -4,7 +4,11 @@
 
 #include "rt64_framebuffer_renderer.h"
 
+#include <atomic>
+#include <cstring>
+
 #include "../include/rt64_extended_gbi.h"
+#include "shared/rt64_jfg_bloom.h"
 
 #include "common/rt64_elapsed_timer.h"
 #include "common/rt64_math.h"
@@ -48,6 +52,28 @@ namespace interop {
         float2 TexelSize;
     };
 };
+
+// JFG PORT: screen-space ambient occlusion settings, written by the port's options (src/jfg/jfg_options.cpp, push_render_options).
+std::atomic<int> rt64_jfg_ssao{ 0 };
+std::atomic<float> rt64_jfg_ssao_strength{ 1.0f };
+std::atomic<float> rt64_jfg_ssao_radius{ 150.0f };
+std::atomic<int> rt64_jfg_bloom{ 0 };
+std::atomic<float> rt64_jfg_bloom_intensity{ 0.6f };
+std::atomic<float> rt64_jfg_bloom_threshold{ 0.7f };
+std::atomic<float> rt64_jfg_bloom_radius{ 6.0f };
+std::atomic<int> rt64_jfg_paused{ 0 }; // 1 while the game's pause screen is up (set by the game side)
+std::atomic<float> rt64_jfg_fov_tan{ 0.0f }; // tan(half the game's vertical field of view), 0 = not known yet (SsaoPS.hlsl)
+std::atomic<int> rt64_jfg_fog{ 0 };            // depth-based fog (FogPS.hlsl), experimental
+std::atomic<int> rt64_jfg_fog_blocked{ 0 };    // 1 while the game's own fog is within the far plane (set by the game side)
+std::atomic<uint32_t> rt64_jfg_fog_drawn{ 0 };     // scenes the depth-based fog was drawn in (for the F9 menu's status line)
+std::atomic<uint32_t> rt64_jfg_fog_game_scenes{ 0 }; // world scenes whose depth-writing draws blend with the game's fog colour
+std::atomic<float> rt64_jfg_fog_start{ 1500.0f };
+std::atomic<float> rt64_jfg_fog_end{ 9000.0f };
+std::atomic<float> rt64_jfg_fog_density{ 0.5f };
+std::atomic<uint32_t> rt64_jfg_fog_color{ 0xA0B4C8u }; // 0xRRGGBB
+std::atomic<int> rt64_jfg_vignette{ 0 };       // vignette (VignettePS.hlsl)
+std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
+std::atomic<float> rt64_jfg_vignette_size{ 0.45f };
 
 namespace RT64 {
     // Helper functions.
@@ -170,6 +196,10 @@ namespace RT64 {
     void FramebufferRenderer::resetFramebuffers(RenderWorker *worker, bool ubershadersVisible, float ditherNoiseStrength, const RenderMultisampling &multisampling) {
         instanceDrawCallVector.clear();
         hitGroupVector.clear();
+        bloomDescriptorSets.clear(); // JFG PORT: the previous workload has finished on the GPU by now
+        bloomBuffersRetired.clear();
+        bloomSnapshotRetired.clear();
+        jfgFrame++;
         renderIndicesVector.clear();
         rspSmoothNormalVector.clear();
         frameParams.viewUbershaders = ubershadersVisible;
@@ -250,6 +280,7 @@ namespace RT64 {
                     gpuTile.flags.fromCopy = true;
                     gpuTile.flags.rawTMEM = false;
                     gpuTile.flags.hasMipmaps = false;
+                    gpuTile.flags.jfgSoft = tileCopy.jfgSmallSource; // JFG PORT
                 }
             }
             else {
@@ -272,6 +303,7 @@ namespace RT64 {
                 gpuTile.flags.rawTMEM = !textureReplaced && callTile.rawTMEM;
                 gpuTile.flags.hasMipmaps = hasMipmaps;
                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
+                gpuTile.flags.jfgSoft = false; // JFG PORT
             }
         }
     }
@@ -511,8 +543,485 @@ namespace RT64 {
         if (fbStorage->colorTarget != nullptr) {
             switchToGraphicsPipeline();
         }
+
+        // JFG PORT: ambient occlusion and bloom, once per scene. The scene is scanned first for the HUD: the first draw
+        // without any depth test after the 3D world (>= SsaoMinDepthWrites depth-writing draws), or the scene's end.
+        // Bloom goes right before the HUD. Ambient occlusion goes right after the last depth-writing draw before it, so
+        // what is drawn over the world without writing depth (gem and pickup sprites, particles, shots, water,
+        // lens flares) is not darkened by the occlusion of the surfaces behind it. Such depth-tested, non-writing draws
+        // that come earlier, between depth-writing ones, are moved to just after the occlusion pass (in their order);
+        // the depth test still hides them behind anything in front, so only their blending over later opaque draws
+        // behind them changes. Nothing is moved across a fill (clear) or a draw without depth test.
+        const bool targetsPresent = (fbStorage->colorTarget != nullptr) && (fbStorage->depthTarget != nullptr);
+        const bool ssaoOn = (rt64_jfg_ssao.load(std::memory_order_relaxed) != 0) && (ssaoPipeline != nullptr) && (ssaoBlurPipeline != nullptr) &&
+            targetsPresent && (fbStorage->colorWriteDepthRead != nullptr);
+        const bool bloomOn = (rt64_jfg_bloom.load(std::memory_order_relaxed) != 0) && (bloomCompositePipeline != nullptr) &&
+            targetsPresent && (fbStorage->colorWriteDepthRead != nullptr);
+        // JFG PORT: fog and vignette only on the game's own picture during play: not on the pause screen (its backdrop is drawn
+        // once and kept, so it would get them again every frame) and not on smaller 3D scenes (decided after the scan below).
+        const bool jfgPausedAny = (rt64_jfg_paused.load(std::memory_order_relaxed) != 0);
+        const bool fogWanted = (rt64_jfg_fog.load(std::memory_order_relaxed) != 0) &&
+            (fogPipeline != nullptr) && targetsPresent && (fbStorage->colorWriteDepthRead != nullptr) && !jfgPausedAny;
+        const bool vignetteWanted = (rt64_jfg_vignette.load(std::memory_order_relaxed) != 0) && (vignettePipeline != nullptr) &&
+            targetsPresent && (fbStorage->colorWriteDepthRead != nullptr) && !jfgPausedAny;
+        bool fogScene = false;
+        bool vignetteScene = false;
+        const uint32_t SsaoMinDepthWrites = 12;
+        const uint32_t sceneDrawCount = uint32_t(rasterScene.instanceIndices.size());
+        uint32_t ssaoPosition = UINT32_MAX;
+        uint32_t bloomPosition = UINT32_MAX;
+        // JFG PORT: where fog, bloom and vignette go (right before the HUD), and the scene's picture is saved first (see
+        // bloomSnapshots); UINT32_MAX when the scene gets none of them.
+        uint32_t effectsPosition = UINT32_MAX;
+        const uint32_t SsaoMarker = UINT32_MAX;
+        const uint32_t EffectsMarker = UINT32_MAX - 1;
+        thread_local std::vector<uint32_t> drawOrder;
+        thread_local std::vector<uint32_t> deferredDraws;
+        drawOrder.clear();
+        deferredDraws.clear();
+        // JFG PORT: in widescreen the colour buffer is wider than the game's 4:3 picture. The game only draws (and clears) its own
+        // 4:3 area; what lies beyond is whatever was left from earlier frames, which showed up as old pictures at the sides of the
+        // screen. The sides are cleared to black at the start of each 3D scene (below).
+        const bool sidesWide = (fbStorage->colorTarget != nullptr) && (uint64_t(fbStorage->colorTarget->width) * 3ULL > uint64_t(fbStorage->colorTarget->height) * 4ULL + 6ULL);
+        bool worldScene = false;
+        const bool jfgPaused = sidesWide && (rt64_jfg_paused.load(std::memory_order_relaxed) != 0);
+        int32_t sceneTop = INT32_MAX, sceneBottom = INT32_MIN; // vertical extent of the scene's depth-writing draws
+        // The projection of the last perspective draw that wrote depth (the ambient occlusion pass rebuilds positions with it).
+        float ssaoTanHalfFovY = 0.0f, ssaoNear = 0.0f, ssaoFar = 0.0f;
+        if (ssaoOn || bloomOn || sidesWide || fogWanted || vignetteWanted) {
+            uint32_t depthWrites = 0;
+            uint32_t fogBlendWrites = 0; // depth-writing draws whose blender mixes in the fog colour (the game's own fog)
+            uint32_t lastWritePosition = 0;
+            uint32_t hudPosition = sceneDrawCount;
+            for (uint32_t pos = 0; pos < sceneDrawCount; pos++) {
+                const InstanceDrawCall &drawCall = instanceDrawCallVector[rasterScene.instanceIndices[pos]];
+                const bool isTriangles = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ||
+                    (drawCall.type == InstanceDrawCall::Type::RawTriangles) || (drawCall.type == InstanceDrawCall::Type::RegularRect);
+                if (!isTriangles || drawCall.triangles.scissor.isEmpty()) {
+                    continue;
+                }
+
+                const interop::OtherMode otherMode = drawCall.triangles.shaderDesc.otherMode;
+                if (otherMode.zUpd()) {
+                    depthWrites++;
+                    // Blender inputs (bits 16-31 of the other mode, GBL_c1/GBL_c2): first cycle's P at 14-15 and M at 6-7 of
+                    // blenderInputs(); 3 is G_BL_CLR_FOG.
+                    const uint32_t blender = otherMode.blenderInputs();
+                    if ((((blender >> 14) & 3U) == 3U) || (((blender >> 6) & 3U) == 3U)) {
+                        fogBlendWrites++;
+                    }
+                    sceneTop = std::min(sceneTop, drawCall.triangles.scissor.top);
+                    sceneBottom = std::max(sceneBottom, drawCall.triangles.scissor.bottom);
+                    lastWritePosition = pos;
+                    if (drawCall.triangles.jfgNear > 0.0f) {
+                        ssaoTanHalfFovY = drawCall.triangles.jfgTanHalfFovY;
+                        ssaoNear = drawCall.triangles.jfgNear;
+                        ssaoFar = drawCall.triangles.jfgFar;
+                    }
+                }
+                else if (!otherMode.zCmp() && (depthWrites >= SsaoMinDepthWrites)) {
+                    hudPosition = pos;
+                    break;
+                }
+            }
+
+            worldScene = depthWrites >= SsaoMinDepthWrites;
+            // Only a scene that fills the screen's height is the game's picture; the pause screen's character panel is a smaller
+            // 3D scene whose edges must not be blacked out.
+            if (worldScene && sidesWide && !jfgPaused && (uint64_t(std::max(sceneBottom - sceneTop, 0)) * 10ULL < uint64_t(fbStorage->colorTarget->height) * 9ULL)) {
+                worldScene = false;
+            }
+            if (depthWrites >= SsaoMinDepthWrites) {
+                ssaoPosition = ssaoOn ? (lastWritePosition + 1) : UINT32_MAX;
+                bloomPosition = bloomOn ? hudPosition : UINT32_MAX;
+                const bool fullHeight = uint64_t(std::max(sceneBottom - sceneTop, 0)) * 10ULL >= uint64_t(fbStorage->colorTarget->height) * 9ULL;
+                // The level's own fog shows when its scenery blends with the fog colour and the fog lies within the far plane.
+                const bool gameFog = (fogBlendWrites > 0) && (rt64_jfg_fog_blocked.load(std::memory_order_relaxed) != 0);
+                if (gameFog && fullHeight) {
+                    rt64_jfg_fog_game_scenes.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                fogScene = fogWanted && fullHeight && !gameFog;
+                vignetteScene = vignetteWanted && fullHeight;
+                if (bloomOn || fogScene || vignetteScene) {
+                    effectsPosition = hudPosition;
+                }
+            }
+        }
+
+        if (ssaoPosition != UINT32_MAX) {
+            // Draws that may move: from the last fill or no-depth-test draw before the occlusion pass onwards.
+            uint32_t movableStart = 0;
+            for (uint32_t pos = 0; pos < ssaoPosition; pos++) {
+                const InstanceDrawCall &drawCall = instanceDrawCallVector[rasterScene.instanceIndices[pos]];
+                const bool isTriangles = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ||
+                    (drawCall.type == InstanceDrawCall::Type::RawTriangles) || (drawCall.type == InstanceDrawCall::Type::RegularRect);
+                if (drawCall.type == InstanceDrawCall::Type::FillRect) {
+                    movableStart = pos + 1;
+                }
+                else if (isTriangles && !drawCall.triangles.shaderDesc.otherMode.zCmp() && !drawCall.triangles.shaderDesc.otherMode.zUpd()) {
+                    movableStart = pos + 1;
+                }
+            }
+
+            for (uint32_t pos = 0; pos < sceneDrawCount; pos++) {
+                if (pos == ssaoPosition) {
+                    drawOrder.emplace_back(SsaoMarker);
+                    drawOrder.insert(drawOrder.end(), deferredDraws.begin(), deferredDraws.end());
+                }
+
+                if (pos == effectsPosition) {
+                    drawOrder.emplace_back(EffectsMarker);
+                }
+
+                const uint32_t index = rasterScene.instanceIndices[pos];
+                const InstanceDrawCall &drawCall = instanceDrawCallVector[index];
+                const bool isTriangles = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ||
+                    (drawCall.type == InstanceDrawCall::Type::RawTriangles) || (drawCall.type == InstanceDrawCall::Type::RegularRect);
+                if ((pos >= movableStart) && (pos < ssaoPosition) && isTriangles &&
+                    drawCall.triangles.shaderDesc.otherMode.zCmp() && !drawCall.triangles.shaderDesc.otherMode.zUpd())
+                {
+                    deferredDraws.emplace_back(index);
+                }
+                else {
+                    drawOrder.emplace_back(index);
+                }
+            }
+
+            if (ssaoPosition == sceneDrawCount) {
+                drawOrder.emplace_back(SsaoMarker);
+                drawOrder.insert(drawOrder.end(), deferredDraws.begin(), deferredDraws.end());
+            }
+
+            if (effectsPosition == sceneDrawCount) {
+                drawOrder.emplace_back(EffectsMarker);
+            }
+        }
+        else {
+            drawOrder.assign(rasterScene.instanceIndices.begin(), rasterScene.instanceIndices.end());
+            if (effectsPosition != UINT32_MAX) {
+                drawOrder.insert(drawOrder.begin() + effectsPosition, EffectsMarker);
+            }
+        }
+        // JFG PORT: keep the scene as it is now, before fog, glow and vignette go on (see bloomSnapshots): the next scene for this
+        // colour buffer starts from it, so the parts the game does not draw again do not get the effects added again and again.
+        auto takeSnapshot = [&]() {
+            RenderTarget *colorTarget = fbStorage->colorTarget;
+            const uint32_t width = colorTarget->width;
+            const uint32_t height = colorTarget->height;
+            {
+                const RenderFormat snapshotFormat = colorTarget->format;
+                const uint32_t snapshotSamples = colorTarget->multisampling.sampleCount;
+                BloomSnapshot *snapshot = nullptr;
+                for (const std::unique_ptr<BloomSnapshot> &entry : bloomSnapshots) {
+                    if (entry->target == colorTarget) {
+                        snapshot = entry.get();
+                        break;
+                    }
+                }
+
+                if (snapshot == nullptr) {
+                    if (bloomSnapshots.size() >= 6) {
+                        for (std::unique_ptr<BloomSnapshot> &entry : bloomSnapshots) {
+                            bloomSnapshotRetired.emplace_back(std::move(entry->texture));
+                        }
+
+                        bloomSnapshots.clear();
+                    }
+
+                    bloomSnapshots.emplace_back(std::make_unique<BloomSnapshot>());
+                    snapshot = bloomSnapshots.back().get();
+                    snapshot->target = colorTarget;
+                }
+
+                if (snapshot->targetTexture != colorTarget->texture.get()) {
+                    snapshot->targetTexture = colorTarget->texture.get();
+                    snapshot->valid = false;
+                }
+
+                if ((snapshot->texture == nullptr) || (snapshot->width != width) || (snapshot->height != height) ||
+                    (snapshot->format != snapshotFormat) || (snapshot->samples != snapshotSamples))
+                {
+                    if (snapshot->texture != nullptr) {
+                        bloomSnapshotRetired.emplace_back(std::move(snapshot->texture));
+                    }
+
+                    snapshot->valid = false;
+                    RenderClearValue snapshotClear = RenderClearValue::Color(RenderColor(), snapshotFormat);
+                    snapshot->texture = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, snapshotFormat, colorTarget->multisampling, &snapshotClear));
+                    if (snapshot->texture != nullptr) {
+                        snapshot->texture->setName("JFG Bloom Snapshot");
+                        snapshot->width = width;
+                        snapshot->height = height;
+                        snapshot->format = snapshotFormat;
+                        snapshot->samples = snapshotSamples;
+                    }
+                }
+
+                if (snapshot->texture != nullptr) {
+                    worker->commandList->barriers(RenderBarrierStage::COPY, {
+                        RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COPY_SOURCE),
+                        RenderTextureBarrier(snapshot->texture.get(), RenderTextureLayout::COPY_DEST)
+                    });
+                    worker->commandList->copyTexture(snapshot->texture.get(), colorTarget->texture.get());
+                    snapshot->valid = true;
+                    snapshot->frame = jfgFrame;
+                }
+            }
+
+            // Back to drawing into the scene target (depth stays read-only).
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
+            worker->commandList->setFramebuffer(fbStorage->colorWriteDepthRead.get());
+            switchToGraphicsPipeline();
+        };
+        auto submitBloom = [&]() {
+            RenderTarget *colorTarget = fbStorage->colorTarget;
+            const uint32_t width = colorTarget->width;
+            const uint32_t height = colorTarget->height;
+            const uint32_t scale = std::max(1U, uint32_t(std::lround(height / 270.0)));
+            BloomBuffers *buffers = getBloomBuffers(worker, (width + scale - 1) / scale, (height + scale - 1) / scale);
+            if (buffers == nullptr) {
+                return;
+            }
+
+            interop::BloomCB cb = {};
+            cb.threshold = rt64_jfg_bloom_threshold.load(std::memory_order_relaxed);
+            cb.knee = 0.1f;
+            cb.intensity = rt64_jfg_bloom_intensity.load(std::memory_order_relaxed);
+            cb.sigma = rt64_jfg_bloom_radius.load(std::memory_order_relaxed);
+            cb.scale = scale;
+            RenderDescriptorSet *sceneSet = makeBloomDescriptorSet(worker, colorTarget->texture.get(), colorTarget->textureView.get());
+            RenderDescriptorSet *bufferSet[2] = {
+                makeBloomDescriptorSet(worker, buffers->texture[0].get(), buffers->textureView[0].get()),
+                makeBloomDescriptorSet(worker, buffers->texture[1].get(), buffers->textureView[1].get())
+            };
+
+            const RenderViewport smallViewport(0.0f, 0.0f, float(buffers->width), float(buffers->height));
+            const RenderRect smallRect(0, 0, int32_t(buffers->width), int32_t(buffers->height));
+            auto bloomPass = [&](RenderPipeline *pipeline, RenderTexture *input, RenderTextureLayout inputLayout, uint32_t output, RenderDescriptorSet *set) {
+                worker->commandList->barriers(RenderBarrierStage::GRAPHICS, {
+                    RenderTextureBarrier(input, inputLayout),
+                    RenderTextureBarrier(buffers->texture[output].get(), RenderTextureLayout::COLOR_WRITE)
+                });
+                worker->commandList->setFramebuffer(buffers->framebuffer[output].get());
+                worker->commandList->setPipeline(pipeline);
+                worker->commandList->setGraphicsPipelineLayout(bloomPipelineLayout);
+                worker->commandList->setGraphicsDescriptorSet(set, 0);
+                worker->commandList->setViewports(smallViewport);
+                worker->commandList->setScissors(smallRect);
+                worker->commandList->setGraphicsPushConstants(0, &cb);
+                worker->commandList->drawInstanced(3, 1, 0, 0);
+            };
+
+            // Bright parts of the scene, downsampled into buffer 0; blurred across into 1 and down back into 0.
+            bloomPass(bloomExtractPipeline, colorTarget->texture.get(), RenderTextureLayout::SHADER_READ, 0, sceneSet);
+            cb.directionX = 1; cb.directionY = 0;
+            bloomPass(bloomBlurPipeline, buffers->texture[0].get(), RenderTextureLayout::SHADER_READ, 1, bufferSet[0]);
+            cb.directionX = 0; cb.directionY = 1;
+            bloomPass(bloomBlurPipeline, buffers->texture[1].get(), RenderTextureLayout::SHADER_READ, 0, bufferSet[1]);
+
+            // Back to the scene target (depth stays read-only), add the bloom.
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, {
+                RenderTextureBarrier(buffers->texture[0].get(), RenderTextureLayout::SHADER_READ),
+                RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE)
+            });
+            worker->commandList->setFramebuffer(fbStorage->colorWriteDepthRead.get());
+            worker->commandList->setPipeline(bloomCompositePipeline);
+            worker->commandList->setGraphicsPipelineLayout(bloomPipelineLayout);
+            worker->commandList->setGraphicsDescriptorSet(bufferSet[0], 0);
+            worker->commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
+            worker->commandList->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
+            worker->commandList->setGraphicsPushConstants(0, &cb);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            // Restore everything the scene's draws expect.
+            switchToGraphicsPipeline();
+        };
+        // JFG PORT: ambient occlusion in two passes (see SsaoPS.hlsl): from the depth into the occlusion buffer, then blurred
+        // (keeping edges) and multiplied into the scene.
+        auto submitSsao = [&]() {
+            RenderTarget *colorTarget = fbStorage->colorTarget;
+            const uint32_t width = colorTarget->width;
+            const uint32_t height = colorTarget->height;
+            BloomBuffers *buffers = getBloomBuffers(worker, width, height, true);
+            if (buffers == nullptr) {
+                return;
+            }
+
+            switchToDepthRead();
+            const RenderViewport fullViewport(0.0f, 0.0f, float(width), float(height));
+            const RenderRect fullRect(0, 0, int32_t(width), int32_t(height));
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(buffers->texture[0].get(), RenderTextureLayout::COLOR_WRITE));
+            worker->commandList->setFramebuffer(buffers->framebuffer[0].get());
+            worker->commandList->setPipeline(ssaoPipeline);
+            worker->commandList->setViewports(fullViewport);
+            worker->commandList->setScissors(fullRect);
+            interop::RasterParams ssaoParams = {};
+            const float strength = rt64_jfg_ssao_strength.load(std::memory_order_relaxed);
+            const float radius = rt64_jfg_ssao_radius.load(std::memory_order_relaxed);
+            memcpy(&ssaoParams.padding.x, &strength, sizeof(float));
+            memcpy(&ssaoParams.padding.y, &radius, sizeof(float));
+            // The scene's own projection; without one, the field of view the game last set (camSetFOV) and its usual planes.
+            const float fovTan = (ssaoNear > 0.0f) ? ssaoTanHalfFovY : rt64_jfg_fov_tan.load(std::memory_order_relaxed);
+            memcpy(&ssaoParams.padding.z, &fovTan, sizeof(float));
+            ssaoParams.screenScale.x = ssaoNear;
+            ssaoParams.screenScale.y = ssaoFar;
+            worker->commandList->setGraphicsPushConstants(0, &ssaoParams);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            // Back to the scene target (depth stays read-only), blur the occlusion onto it.
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, {
+                RenderTextureBarrier(buffers->texture[0].get(), RenderTextureLayout::SHADER_READ),
+                RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE)
+            });
+            worker->commandList->setFramebuffer(fbStorage->colorWriteDepthRead.get());
+            worker->commandList->setPipeline(ssaoBlurPipeline);
+            worker->commandList->setGraphicsPipelineLayout(bloomPipelineLayout);
+            worker->commandList->setGraphicsDescriptorSet(makeBloomDescriptorSet(worker, buffers->texture[0].get(), buffers->textureView[0].get()), 0);
+            worker->commandList->setViewports(fullViewport);
+            worker->commandList->setScissors(fullRect);
+            interop::BloomCB blurParams = {};
+            worker->commandList->setGraphicsPushConstants(0, &blurParams);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            // Restore everything the scene's draws expect.
+            switchToGraphicsPipeline();
+        };
+        // JFG PORT: full-screen passes in the scene's own pipeline layout (see FogPS.hlsl / VignettePS.hlsl).
+        auto submitFullScreen = [&](RenderPipeline *pipeline, const interop::RasterParams &params) {
+            worker->commandList->setPipeline(pipeline);
+            worker->commandList->setScissors(RenderRect(0, 0, int32_t(fbStorage->colorTarget->width), int32_t(fbStorage->colorTarget->height)));
+            worker->commandList->setGraphicsPushConstants(0, &params);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+            previousPipeline = nullptr;
+            previousScissor = RenderRect();
+            previousCallType = InstanceDrawCall::Type::Unknown;
+        };
+        auto submitFog = [&]() {
+            interop::RasterParams fogParams = {};
+            const float start = rt64_jfg_fog_start.load(std::memory_order_relaxed);
+            const float end = rt64_jfg_fog_end.load(std::memory_order_relaxed);
+            const float density = rt64_jfg_fog_density.load(std::memory_order_relaxed);
+            const uint32_t color = rt64_jfg_fog_color.load(std::memory_order_relaxed);
+            memcpy(&fogParams.padding.x, &start, sizeof(float));
+            memcpy(&fogParams.padding.y, &end, sizeof(float));
+            memcpy(&fogParams.padding.z, &density, sizeof(float));
+            fogParams.screenScale.x = float((color >> 16) & 0xFF) / 255.0f;
+            fogParams.screenScale.y = float((color >> 8) & 0xFF) / 255.0f;
+            fogParams.screenOffset.x = float(color & 0xFF) / 255.0f;
+            submitFullScreen(fogPipeline, fogParams);
+        };
+        auto submitVignette = [&]() {
+            interop::RasterParams vignetteParams = {};
+            const float strength = rt64_jfg_vignette_strength.load(std::memory_order_relaxed);
+            const float size = rt64_jfg_vignette_size.load(std::memory_order_relaxed);
+            const float aspect = float(fbStorage->colorTarget->width) / float(std::max(fbStorage->colorTarget->height, 1U));
+            memcpy(&vignetteParams.padding.x, &strength, sizeof(float));
+            memcpy(&vignetteParams.padding.y, &size, sizeof(float));
+            memcpy(&vignetteParams.padding.z, &aspect, sizeof(float));
+            submitFullScreen(vignettePipeline, vignetteParams);
+        };
+        // Right before the HUD: save the clean picture, then fog (so bloom glows over the fogged scene), bloom, vignette.
+        auto submitEffects = [&]() {
+            takeSnapshot();
+            if (fogScene) {
+                submitFog();
+                rt64_jfg_fog_drawn.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            if (bloomPosition != UINT32_MAX) {
+                submitBloom();
+            }
+
+            if (vignetteScene) {
+                submitVignette();
+            }
+        };
         
-        for (uint32_t i : rasterScene.instanceIndices) {
+        // JFG PORT: is this the first scene to draw into this colour buffer in this frame? Restoring the saved picture over the
+        // buffer is only right then; later it would wipe what the earlier scenes of the frame (a backdrop, say) have drawn.
+        bool firstSceneOnTarget = true;
+        if (fbStorage->colorTarget != nullptr) {
+            bool found = false;
+            for (std::pair<const RenderTarget *, uint32_t> &touched : jfgTargetsTouched) {
+                if (touched.first == fbStorage->colorTarget) {
+                    firstSceneOnTarget = (touched.second != jfgFrame);
+                    touched.second = jfgFrame;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                jfgTargetsTouched.emplace_back(fbStorage->colorTarget, jfgFrame);
+            }
+        }
+
+        // JFG PORT: a scene without bloom (or fog / vignette) that draws into a colour buffer changes what the saved picture of that buffer was
+        // made from (a fade to black, another screen), so the picture is dropped: restoring it later would bring back an old image.
+        if ((effectsPosition == UINT32_MAX) && (sceneDrawCount > 0) && (fbStorage->colorTarget != nullptr)) {
+            for (const std::unique_ptr<BloomSnapshot> &entry : bloomSnapshots) {
+                if ((entry->target == fbStorage->colorTarget) && (entry->frame != jfgFrame)) {
+                    entry->valid = false;
+                }
+            }
+        }
+
+        // JFG PORT: a scene that gets bloom (or fog / vignette) starts from the clean picture saved when the last one for this colour buffer was
+        // made, so the parts the game does not draw again do not get the glow added to the old glow (see bloomSnapshots).
+        if ((effectsPosition != UINT32_MAX) && firstSceneOnTarget) {
+            RenderTarget *colorTarget = fbStorage->colorTarget;
+            for (const std::unique_ptr<BloomSnapshot> &entry : bloomSnapshots) {
+                if ((entry->target != colorTarget) || !entry->valid || (entry->texture == nullptr) || (entry->frame == jfgFrame) ||
+                    (entry->targetTexture != colorTarget->texture.get()))
+                {
+                    continue;
+                }
+
+                if ((entry->width == colorTarget->width) && (entry->height == colorTarget->height) &&
+                    (entry->format == colorTarget->format) && (entry->samples == colorTarget->multisampling.sampleCount))
+                {
+                    worker->commandList->barriers(RenderBarrierStage::COPY, {
+                        RenderTextureBarrier(entry->texture.get(), RenderTextureLayout::COPY_SOURCE),
+                        RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COPY_DEST)
+                    });
+                    worker->commandList->copyTexture(colorTarget->texture.get(), entry->texture.get());
+                    worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
+                    worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
+                    switchToGraphicsPipeline();
+                }
+
+                entry->valid = false;
+                break;
+            }
+        }
+
+        if (sidesWide && (worldScene || jfgPaused) && ((jfgSidesClearedTarget != fbStorage->colorTarget) || (jfgSidesClearedFrame != jfgFrame))) {
+            const RenderTarget *target = fbStorage->colorTarget;
+            const int32_t fullWidth = int32_t(target->width);
+            const int32_t sideWidth = (fullWidth - int32_t((uint64_t(target->height) * 4ULL) / 3ULL)) / 2;
+            if (sideWidth > 0) {
+                const RenderRect sides[2] = {
+                    RenderRect(0, 0, sideWidth, int32_t(target->height)),
+                    RenderRect(fullWidth - sideWidth, 0, fullWidth, int32_t(target->height))
+                };
+                worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 1.0f), sides, 2);
+            }
+
+            jfgSidesClearedTarget = target;
+            jfgSidesClearedFrame = jfgFrame;
+        }
+
+        for (uint32_t i : drawOrder) {
+            if (i == SsaoMarker) {
+                submitSsao();
+                continue;
+            }
+            else if (i == EffectsMarker) {
+                switchToDepthRead();
+                submitEffects();
+                continue;
+            }
+
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
             switch (drawCall.type) {
             case InstanceDrawCall::Type::IndexedTriangles: 
@@ -561,9 +1070,22 @@ namespace RT64 {
                     switchToDepthWrite();
                 }
 
-                if (previousScissor != triangles.scissor) {
-                    worker->commandList->setScissors(triangles.scissor);
-                    previousScissor = triangles.scissor;
+                // JFG PORT: the pause screens are 4:3 pictures. Their 3D objects (the planets of the map) reach beyond the picture,
+                // which in widescreen would show in the sides, so nothing is drawn there while paused.
+                RenderRect drawScissor = triangles.scissor;
+                if (jfgPaused) {
+                    const int32_t pictureWidth = int32_t((uint64_t(fbStorage->colorTarget->height) * 4ULL) / 3ULL);
+                    const int32_t sideWidth = (int32_t(fbStorage->colorTarget->width) - pictureWidth) / 2;
+                    drawScissor.left = std::max(drawScissor.left, sideWidth);
+                    drawScissor.right = std::min(drawScissor.right, sideWidth + pictureWidth);
+                    if (drawScissor.isEmpty()) {
+                        continue;
+                    }
+                }
+
+                if (previousScissor != drawScissor) {
+                    worker->commandList->setScissors(drawScissor);
+                    previousScissor = drawScissor;
                 }
 
                 if (previousPipeline != triangles.pipeline) {
@@ -638,6 +1160,7 @@ namespace RT64 {
             }
         }
 
+
         // Mark targets for resolve.
         if (fbStorage->colorTarget != nullptr) {
             fbStorage->colorTarget->markForResolve();
@@ -646,6 +1169,52 @@ namespace RT64 {
         if (fbStorage->depthTarget != nullptr) {
             fbStorage->depthTarget->markForResolve();
         }
+    }
+
+    // JFG PORT: bloom buffers for one size (see submitRasterScene); with ssao, the ambient occlusion buffer (one texture).
+    FramebufferRenderer::BloomBuffers *FramebufferRenderer::getBloomBuffers(RenderWorker *worker, uint32_t width, uint32_t height, bool ssao) {
+        std::vector<std::unique_ptr<BloomBuffers>> &bloomBuffers = ssao ? this->ssaoBuffers : this->bloomBuffers;
+        for (const std::unique_ptr<BloomBuffers> &buffers : bloomBuffers) {
+            if ((buffers->width == width) && (buffers->height == height)) {
+                return buffers.get();
+            }
+        }
+
+        // Window resized many times: retire the old sizes; they are freed once this workload has finished.
+        if (bloomBuffers.size() >= 4) {
+            for (std::unique_ptr<BloomBuffers> &buffers : bloomBuffers) {
+                bloomBuffersRetired.emplace_back(std::move(buffers));
+            }
+
+            bloomBuffers.clear();
+        }
+
+        std::unique_ptr<BloomBuffers> buffers = std::make_unique<BloomBuffers>();
+        buffers->width = width;
+        buffers->height = height;
+        const RenderFormat format = RasterShaderUber::BloomBufferFormat;
+        RenderClearValue clearValue = RenderClearValue::Color(RenderColor(), format);
+        for (uint32_t i = 0; i < (ssao ? 1U : 2U); i++) {
+            buffers->texture[i] = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, format, RenderMultisampling(), &clearValue));
+            if (buffers->texture[i] == nullptr) {
+                return nullptr;
+            }
+
+            buffers->texture[i]->setName(ssao ? std::string("JFG Ambient Occlusion") : ("JFG Bloom #" + std::to_string(i)));
+            buffers->textureView[i] = buffers->texture[i]->createTextureView(RenderTextureViewDesc::Texture2D(format));
+            const RenderTexture *colorTexture = buffers->texture[i].get();
+            buffers->framebuffer[i] = worker->device->createFramebuffer(RenderFramebufferDesc(&colorTexture, 1));
+        }
+
+        bloomBuffers.emplace_back(std::move(buffers));
+        return bloomBuffers.back().get();
+    }
+
+    RenderDescriptorSet *FramebufferRenderer::makeBloomDescriptorSet(RenderWorker *worker, RenderTexture *texture, RenderTextureView *textureView) {
+        std::unique_ptr<RenderTargetCopyDescriptorSet> set = std::make_unique<RenderTargetCopyDescriptorSet>(worker->device);
+        set->setTexture(set->gInput, texture, RenderTextureLayout::SHADER_READ, textureView);
+        bloomDescriptorSets.emplace_back(std::move(set));
+        return bloomDescriptorSets.back()->get();
     }
 
     void FramebufferRenderer::updateMultisampling() {
@@ -1354,6 +1923,14 @@ namespace RT64 {
         postBlendDitherNoiseAddPipeline = rasterShaderUber->postBlendDitherNoiseAddPipeline.get();
         postBlendDitherNoiseSubPipeline = rasterShaderUber->postBlendDitherNoiseSubPipeline.get();
         postBlendDitherNoiseSubNegativePipeline = rasterShaderUber->postBlendDitherNoiseSubNegativePipeline.get();
+        ssaoPipeline = rasterShaderUber->ssaoPipeline.get();
+        fogPipeline = rasterShaderUber->fogPipeline.get();
+        vignettePipeline = rasterShaderUber->vignettePipeline.get();
+        bloomPipelineLayout = rasterShaderUber->bloomPipelineLayout.get();
+        bloomExtractPipeline = rasterShaderUber->bloomExtractPipeline.get();
+        bloomBlurPipeline = rasterShaderUber->bloomBlurPipeline.get();
+        bloomCompositePipeline = rasterShaderUber->bloomCompositePipeline.get();
+        ssaoBlurPipeline = rasterShaderUber->ssaoBlurPipeline.get();
 
         // Make a new render target draw call.
         RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
@@ -1481,6 +2058,24 @@ namespace RT64 {
             triangles.screenScale = { 1.0f, 1.0f };
             triangles.screenOffset = halfPixelOffset;
 
+            // JFG PORT: field of view and depth range of this projection, for the ambient occlusion pass. From a guPerspective
+            // matrix (all elements times its scale): m[1][1] = s / tan(fovy / 2), m[2][3] = -s, m[2][2] = s (n + f) / (n - f),
+            // m[3][2] = s 2nf / (n - f).
+            float projTanHalfFovY = 0.0f, projNear = 0.0f, projFar = 0.0f;
+            if ((proj.type == Projection::Type::Perspective) && (proj.transformsIndex < drawData.projTransforms.size())) {
+                const interop::float4x4 &m = drawData.projTransforms[proj.transformsIndex];
+                const float s = -m[2][3];
+                if ((s > 1e-6f) && (fabsf(m[1][1]) > 1e-6f)) {
+                    const float m22 = m[2][2] / s, m32 = m[3][2] / s;
+                    const float n = m32 / (m22 - 1.0f), f = m32 / (m22 + 1.0f);
+                    if ((n > 0.0f) && (f > n) && std::isfinite(f)) {
+                        projTanHalfFovY = s / fabsf(m[1][1]);
+                        projNear = n;
+                        projFar = f;
+                    }
+                }
+            }
+
             float projInvRatioScale = 1.0f / aspectRatioScale;
             const int16_t *viewportClipRatios = &drawData.viewportClipRatios[proj.transformsIndex * 4];
             const uint16_t viewportOrigin = drawData.viewportOrigins[proj.transformsIndex];
@@ -1488,13 +2083,16 @@ namespace RT64 {
                 // The call's scissor spans the whole width of the framebuffer pair scissor. Custom origin must not be in use to be able to use the stretched viewport.
                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
-                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx + 4 >= fbPair.scissorRect.lrx); // JFG PORT: see rt64_projection_processor.cpp
                 bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
+                // JFG PORT: a narrow projection whose shared matrix the projection processor already widened would be
+                // squeezed twice (the Tribal counter's heads landed on their numbers). Its matrix already keeps 4:3.
+                const bool sharedWideMatrix = (proj.transformsIndex < drawData.jfgProjAdjusted.size()) && (drawData.jfgProjAdjusted[proj.transformsIndex] != 0);
                 if (useWideViewport) {
                     projInvRatioScale = 1.0f;
                 }
-                else {
+                else if (!sharedWideMatrix) {
                     triangles.screenScale.x = originalWidth / wideWidth;
 
                     if (viewportOrigin < G_EX_ORIGIN_NONE) {
@@ -1539,7 +2137,9 @@ namespace RT64 {
                     int32_t horizontalMisalignment = 0;
 
                     // A rect that spans the whole width of the scissor.
-                    if ((call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) && (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx)) {
+                    // JFG PORT: one pixel short counts too (see rt64_projection_processor.cpp). The reflective floors' picture is cleared
+                    // with a fill to 319 under a scissor to 320; kept at 4:3, its sides were never cleared and the floors showed a 4:3 box.
+                    if ((call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) && (call.callDesc.rect.lrx + 4 >= fbPair.scissorRect.lrx)) {
                         invRatioScale = 1.0f;
                     }
                     // A regular rectangle that should correct its misalignment.
@@ -1622,6 +2222,9 @@ namespace RT64 {
                         triangles.faceCount = call.callDesc.triangleCount;
                         triangles.vertexTestZ = (vertexTestZCallIndex >= 0);
                         triangles.postBlendDitherNoise = false;
+                        triangles.jfgTanHalfFovY = projTanHalfFovY;
+                        triangles.jfgNear = projNear;
+                        triangles.jfgFar = projFar;
 
                         float invRatioScale = 1.0f / aspectRatioScale;
                         float horizontalMisalignment = 0.0f;

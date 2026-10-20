@@ -19,6 +19,17 @@
 #include "shaders/PostBlendDitherNoiseAddPS.hlsl.spirv.h"
 #include "shaders/PostBlendDitherNoiseSubPS.hlsl.spirv.h"
 #include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.spirv.h"
+#include "shaders/FullScreenVS.hlsl.spirv.h"
+#include "shaders/SsaoPS.hlsl.spirv.h"
+#include "shaders/SsaoPSMS.hlsl.spirv.h"
+#include "shaders/FogPS.hlsl.spirv.h"
+#include "shaders/FogPSMS.hlsl.spirv.h"
+#include "shaders/VignettePS.hlsl.spirv.h"
+#include "shaders/BloomExtractPS.hlsl.spirv.h"
+#include "shaders/BloomExtractPSMS.hlsl.spirv.h"
+#include "shaders/BloomBlurPS.hlsl.spirv.h"
+#include "shaders/BloomCompositePS.hlsl.spirv.h"
+#include "shaders/SsaoBlurPS.hlsl.spirv.h"
 #ifdef _WIN32
 #   include "shaders/RasterPSLibrary.hlsl.dxil.h"
 #   include "shaders/RasterPSLibraryMS.hlsl.dxil.h"
@@ -29,6 +40,17 @@
 #   include "shaders/PostBlendDitherNoiseAddPS.hlsl.dxil.h"
 #   include "shaders/PostBlendDitherNoiseSubPS.hlsl.dxil.h"
 #   include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.dxil.h"
+#   include "shaders/FullScreenVS.hlsl.dxil.h"
+#   include "shaders/SsaoPS.hlsl.dxil.h"
+#   include "shaders/SsaoPSMS.hlsl.dxil.h"
+#   include "shaders/FogPS.hlsl.dxil.h"
+#   include "shaders/FogPSMS.hlsl.dxil.h"
+#   include "shaders/VignettePS.hlsl.dxil.h"
+#   include "shaders/BloomExtractPS.hlsl.dxil.h"
+#   include "shaders/BloomExtractPSMS.hlsl.dxil.h"
+#   include "shaders/BloomBlurPS.hlsl.dxil.h"
+#   include "shaders/BloomCompositePS.hlsl.dxil.h"
+#   include "shaders/SsaoBlurPS.hlsl.dxil.h"
 #elif defined(__APPLE__)
 #   include "shaders/RasterPSDynamic.hlsl.metal.h"
 #   include "shaders/RasterPSDynamicMS.hlsl.metal.h"
@@ -42,8 +64,20 @@
 #   include "shaders/PostBlendDitherNoiseAddPS.hlsl.metal.h"
 #   include "shaders/PostBlendDitherNoiseSubPS.hlsl.metal.h"
 #   include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.metal.h"
+#   include "shaders/FullScreenVS.hlsl.metal.h"
+#   include "shaders/SsaoPS.hlsl.metal.h"
+#   include "shaders/SsaoPSMS.hlsl.metal.h"
+#   include "shaders/FogPS.hlsl.metal.h"
+#   include "shaders/FogPSMS.hlsl.metal.h"
+#   include "shaders/VignettePS.hlsl.metal.h"
+#   include "shaders/BloomExtractPS.hlsl.metal.h"
+#   include "shaders/BloomExtractPSMS.hlsl.metal.h"
+#   include "shaders/BloomBlurPS.hlsl.metal.h"
+#   include "shaders/BloomCompositePS.hlsl.metal.h"
+#   include "shaders/SsaoBlurPS.hlsl.metal.h"
 #endif
 #include "shared/rt64_raster_params.h"
+#include "shared/rt64_jfg_bloom.h"
 
 #include "rt64_descriptor_sets.h"
 #include "rt64_render_target.h"
@@ -552,6 +586,186 @@ namespace RT64 {
 
         postBlendDesc.pixelShader = postBlendSubNegativePixelShader.get();
         postBlendDitherNoiseSubNegativePipeline = device->createGraphicsPipeline(postBlendDesc);
+
+        // JFG PORT: screen-space ambient occlusion pass. A full-screen triangle that reads the scene depth and writes the
+        // occlusion into its own buffer, blurred onto the colour target by ssaoBlurPipeline (see SsaoPS.hlsl and submitRasterScene).
+        std::unique_ptr<RenderShader> ssaoVertexShader;
+        std::unique_ptr<RenderShader> ssaoPixelShader;
+        switch (shaderFormat) {
+#   ifdef _WIN32
+        case RenderShaderFormat::DXIL:
+            ssaoVertexShader = device->createShader(FullScreenVSBlobDXIL, std::size(FullScreenVSBlobDXIL), "VSMain", shaderFormat);
+            ssaoPixelShader = useMSAA ? device->createShader(SsaoPSMSBlobDXIL, std::size(SsaoPSMSBlobDXIL), "PSMain", shaderFormat) : device->createShader(SsaoPSBlobDXIL, std::size(SsaoPSBlobDXIL), "PSMain", shaderFormat);
+            break;
+#   endif
+        case RenderShaderFormat::SPIRV:
+            ssaoVertexShader = device->createShader(FullScreenVSBlobSPIRV, std::size(FullScreenVSBlobSPIRV), "VSMain", shaderFormat);
+            ssaoPixelShader = useMSAA ? device->createShader(SsaoPSMSBlobSPIRV, std::size(SsaoPSMSBlobSPIRV), "PSMain", shaderFormat) : device->createShader(SsaoPSBlobSPIRV, std::size(SsaoPSBlobSPIRV), "PSMain", shaderFormat);
+            break;
+#   ifdef __APPLE__
+        case RenderShaderFormat::METAL:
+            ssaoVertexShader = device->createShader(FullScreenVSBlobMSL, std::size(FullScreenVSBlobMSL), "VSMain", shaderFormat);
+            ssaoPixelShader = useMSAA ? device->createShader(SsaoPSMSBlobMSL, std::size(SsaoPSMSBlobMSL), "PSMain", shaderFormat) : device->createShader(SsaoPSBlobMSL, std::size(SsaoPSBlobMSL), "PSMain", shaderFormat);
+            break;
+#   endif
+        default:
+            break;
+        }
+
+        if ((ssaoVertexShader != nullptr) && (ssaoPixelShader != nullptr)) {
+            // Written into the occlusion buffer (BloomBufferFormat, one sample per pixel); ssaoBlurPipeline puts it on the scene.
+            RenderGraphicsPipelineDesc ssaoDesc;
+            ssaoDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            ssaoDesc.renderTargetFormat[0] = BloomBufferFormat;
+            ssaoDesc.renderTargetCount = 1;
+            ssaoDesc.cullMode = RenderCullMode::NONE;
+            ssaoDesc.depthEnabled = false;
+            ssaoDesc.depthWriteEnabled = false;
+            ssaoDesc.pipelineLayout = pipelineLayout.get();
+            ssaoDesc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+            ssaoDesc.vertexShader = ssaoVertexShader.get();
+            ssaoDesc.pixelShader = ssaoPixelShader.get();
+            ssaoPipeline = device->createGraphicsPipeline(ssaoDesc);
+        }
+
+        // JFG PORT: depth-based fog (blends towards the fog colour by the shader's alpha) and vignette (multiplies, as the
+        // ambient occlusion does). Full-screen triangles like the ambient occlusion pass; see FogPS.hlsl / VignettePS.hlsl.
+        std::unique_ptr<RenderShader> fogPixelShader;
+        std::unique_ptr<RenderShader> vignettePixelShader;
+        switch (shaderFormat) {
+#   ifdef _WIN32
+        case RenderShaderFormat::DXIL:
+            fogPixelShader = useMSAA ? device->createShader(FogPSMSBlobDXIL, std::size(FogPSMSBlobDXIL), "PSMain", shaderFormat) : device->createShader(FogPSBlobDXIL, std::size(FogPSBlobDXIL), "PSMain", shaderFormat);
+            vignettePixelShader = device->createShader(VignettePSBlobDXIL, std::size(VignettePSBlobDXIL), "PSMain", shaderFormat);
+            break;
+#   endif
+        case RenderShaderFormat::SPIRV:
+            fogPixelShader = useMSAA ? device->createShader(FogPSMSBlobSPIRV, std::size(FogPSMSBlobSPIRV), "PSMain", shaderFormat) : device->createShader(FogPSBlobSPIRV, std::size(FogPSBlobSPIRV), "PSMain", shaderFormat);
+            vignettePixelShader = device->createShader(VignettePSBlobSPIRV, std::size(VignettePSBlobSPIRV), "PSMain", shaderFormat);
+            break;
+#   ifdef __APPLE__
+        case RenderShaderFormat::METAL:
+            fogPixelShader = useMSAA ? device->createShader(FogPSMSBlobMSL, std::size(FogPSMSBlobMSL), "PSMain", shaderFormat) : device->createShader(FogPSBlobMSL, std::size(FogPSBlobMSL), "PSMain", shaderFormat);
+            vignettePixelShader = device->createShader(VignettePSBlobMSL, std::size(VignettePSBlobMSL), "PSMain", shaderFormat);
+            break;
+#   endif
+        default:
+            break;
+        }
+
+        if (ssaoVertexShader != nullptr) {
+            RenderGraphicsPipelineDesc effectDesc;
+            effectDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            effectDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(shaderLibrary->usesHDR);
+            effectDesc.renderTargetCount = 1;
+            effectDesc.cullMode = RenderCullMode::NONE;
+            effectDesc.depthEnabled = false;
+            effectDesc.depthWriteEnabled = false;
+            effectDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            effectDesc.multisampling = multisampling;
+            effectDesc.pipelineLayout = pipelineLayout.get();
+            effectDesc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+            effectDesc.vertexShader = ssaoVertexShader.get();
+
+            RenderBlendDesc &effectBlend = effectDesc.renderTargetBlend[0];
+            effectBlend.blendEnabled = true;
+            effectBlend.blendOp = RenderBlendOperation::ADD;
+            effectBlend.srcBlendAlpha = RenderBlend::ZERO;
+            effectBlend.dstBlendAlpha = RenderBlend::ONE;
+            effectBlend.blendOpAlpha = RenderBlendOperation::ADD;
+            if (fogPixelShader != nullptr) {
+                effectDesc.pixelShader = fogPixelShader.get();
+                effectBlend.srcBlend = RenderBlend::SRC_ALPHA;
+                effectBlend.dstBlend = RenderBlend::INV_SRC_ALPHA;
+                fogPipeline = device->createGraphicsPipeline(effectDesc);
+            }
+
+            if (vignettePixelShader != nullptr) {
+                effectDesc.pixelShader = vignettePixelShader.get();
+                effectBlend.srcBlend = RenderBlend::ZERO;
+                effectBlend.dstBlend = RenderBlend::SRC_COLOR;
+                vignettePipeline = device->createGraphicsPipeline(effectDesc);
+            }
+        }
+
+        // JFG PORT: bloom passes (see BloomPS.hlsl and submitRasterScene). Own layout: BloomCB + one input texture.
+        std::unique_ptr<RenderShader> bloomExtractShader;
+        std::unique_ptr<RenderShader> bloomBlurShader;
+        std::unique_ptr<RenderShader> bloomCompositeShader;
+        std::unique_ptr<RenderShader> ssaoBlurShader;
+        switch (shaderFormat) {
+#   ifdef _WIN32
+        case RenderShaderFormat::DXIL:
+            bloomExtractShader = useMSAA ? device->createShader(BloomExtractPSMSBlobDXIL, std::size(BloomExtractPSMSBlobDXIL), "PSMain", shaderFormat) : device->createShader(BloomExtractPSBlobDXIL, std::size(BloomExtractPSBlobDXIL), "PSMain", shaderFormat);
+            bloomBlurShader = device->createShader(BloomBlurPSBlobDXIL, std::size(BloomBlurPSBlobDXIL), "PSMain", shaderFormat);
+            bloomCompositeShader = device->createShader(BloomCompositePSBlobDXIL, std::size(BloomCompositePSBlobDXIL), "PSMain", shaderFormat);
+            ssaoBlurShader = device->createShader(SsaoBlurPSBlobDXIL, std::size(SsaoBlurPSBlobDXIL), "PSMain", shaderFormat);
+            break;
+#   endif
+        case RenderShaderFormat::SPIRV:
+            bloomExtractShader = useMSAA ? device->createShader(BloomExtractPSMSBlobSPIRV, std::size(BloomExtractPSMSBlobSPIRV), "PSMain", shaderFormat) : device->createShader(BloomExtractPSBlobSPIRV, std::size(BloomExtractPSBlobSPIRV), "PSMain", shaderFormat);
+            bloomBlurShader = device->createShader(BloomBlurPSBlobSPIRV, std::size(BloomBlurPSBlobSPIRV), "PSMain", shaderFormat);
+            bloomCompositeShader = device->createShader(BloomCompositePSBlobSPIRV, std::size(BloomCompositePSBlobSPIRV), "PSMain", shaderFormat);
+            ssaoBlurShader = device->createShader(SsaoBlurPSBlobSPIRV, std::size(SsaoBlurPSBlobSPIRV), "PSMain", shaderFormat);
+            break;
+#   ifdef __APPLE__
+        case RenderShaderFormat::METAL:
+            bloomExtractShader = useMSAA ? device->createShader(BloomExtractPSMSBlobMSL, std::size(BloomExtractPSMSBlobMSL), "PSMain", shaderFormat) : device->createShader(BloomExtractPSBlobMSL, std::size(BloomExtractPSBlobMSL), "PSMain", shaderFormat);
+            bloomBlurShader = device->createShader(BloomBlurPSBlobMSL, std::size(BloomBlurPSBlobMSL), "PSMain", shaderFormat);
+            bloomCompositeShader = device->createShader(BloomCompositePSBlobMSL, std::size(BloomCompositePSBlobMSL), "PSMain", shaderFormat);
+            ssaoBlurShader = device->createShader(SsaoBlurPSBlobMSL, std::size(SsaoBlurPSBlobMSL), "PSMain", shaderFormat);
+            break;
+#   endif
+        default:
+            break;
+        }
+
+        if ((ssaoVertexShader != nullptr) && (bloomExtractShader != nullptr) && (bloomBlurShader != nullptr) && (bloomCompositeShader != nullptr)) {
+            RenderTargetCopyDescriptorSet bloomDescriptorSet;
+            RenderPipelineLayoutBuilder bloomLayoutBuilder;
+            bloomLayoutBuilder.begin();
+            bloomLayoutBuilder.addPushConstant(0, 0, sizeof(interop::BloomCB), RenderShaderStageFlag::PIXEL);
+            bloomLayoutBuilder.addDescriptorSet(bloomDescriptorSet);
+            bloomLayoutBuilder.end();
+            bloomPipelineLayout = bloomLayoutBuilder.create(device);
+
+            RenderGraphicsPipelineDesc bloomDesc;
+            bloomDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            bloomDesc.renderTargetFormat[0] = BloomBufferFormat;
+            bloomDesc.renderTargetCount = 1;
+            bloomDesc.cullMode = RenderCullMode::NONE;
+            bloomDesc.pipelineLayout = bloomPipelineLayout.get();
+            bloomDesc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+            bloomDesc.vertexShader = ssaoVertexShader.get();
+            bloomDesc.pixelShader = bloomExtractShader.get();
+            bloomExtractPipeline = device->createGraphicsPipeline(bloomDesc);
+
+            bloomDesc.pixelShader = bloomBlurShader.get();
+            bloomBlurPipeline = device->createGraphicsPipeline(bloomDesc);
+
+            // Composite: into the scene's colour target (with its read-only depth bound), added to what is there.
+            bloomDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(shaderLibrary->usesHDR);
+            bloomDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            bloomDesc.multisampling = multisampling;
+            bloomDesc.pixelShader = bloomCompositeShader.get();
+            RenderBlendDesc &bloomBlend = bloomDesc.renderTargetBlend[0];
+            bloomBlend.blendEnabled = true;
+            bloomBlend.srcBlend = RenderBlend::ONE;
+            bloomBlend.dstBlend = RenderBlend::ONE;
+            bloomBlend.blendOp = RenderBlendOperation::ADD;
+            bloomBlend.srcBlendAlpha = RenderBlend::ZERO;
+            bloomBlend.dstBlendAlpha = RenderBlend::ONE;
+            bloomBlend.blendOpAlpha = RenderBlendOperation::ADD;
+            bloomCompositePipeline = device->createGraphicsPipeline(bloomDesc);
+
+            // Ambient occlusion blur: the occlusion buffer, blurred, multiplies the scene's colour target.
+            if (ssaoBlurShader != nullptr) {
+                bloomDesc.pixelShader = ssaoBlurShader.get();
+                bloomBlend.srcBlend = RenderBlend::ZERO;
+                bloomBlend.dstBlend = RenderBlend::SRC_COLOR;
+                ssaoBlurPipeline = device->createGraphicsPipeline(bloomDesc);
+            }
+        }
     }
 
     RasterShaderUber::~RasterShaderUber() {
