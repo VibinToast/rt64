@@ -416,6 +416,15 @@ namespace RT64 {
                     static std::chrono::steady_clock::time_point lastPresent;
                     const auto now = std::chrono::steady_clock::now();
                     const double gapMs = std::chrono::duration<double, std::milli>(now - lastPresent).count();
+                    static uint32_t gaps[5] = {}, presents = 0;
+                    if (hitchTrace && (lastPresent != std::chrono::steady_clock::time_point{})) {
+                        gaps[(gapMs < 6.0) ? 0 : (gapMs < 11.0) ? 1 : (gapMs < 14.0) ? 2 : (gapMs < 20.0) ? 3 : 4]++;
+                        if ((++presents % 240) == 0) {
+                            fprintf(stderr, "[PRESENT] gaps: <6 ms %u, 6-11 %u, 11-14 %u, 14-20 %u, >20 %u\n", gaps[0], gaps[1], gaps[2], gaps[3], gaps[4]);
+                            for (uint32_t &g : gaps) g = 0;
+                        }
+                    }
+
                     if (hitchTrace && (lastPresent != std::chrono::steady_clock::time_point{}) && (gapMs > 50.0)) {
                         fprintf(stderr, "[HITCH] %.0f ms between presents\n", gapMs);
                     }
