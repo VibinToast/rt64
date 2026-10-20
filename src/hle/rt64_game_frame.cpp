@@ -312,7 +312,31 @@ namespace RT64 {
                     prevIt++;
                 }
                 else {
-                    matchTransform(curWorkload, prevWorkload, curWorkloadMap, prevWorkloadMap, curIt->second, prevIt->second, modifiedBuffers);
+                    // JFG PORT: a pair that moved or turned more than anything does in one game frame is not the same
+                    // thing (or it jumped: a teleport, a weapon taken out); it is drawn where it is, not blended.
+                    const hlslpp::float4x4 &curMatrix = curWorkload.drawData.worldTransforms[curIt->second];
+                    const hlslpp::float4x4 &prevMatrix = prevWorkload.drawData.worldTransforms[prevIt->second];
+                    float basisJump = 0.0f, scaleSize = 0.0f;
+                    for (int r = 0; r < 3; r++) {
+                        for (int c = 0; c < 3; c++) {
+                            basisJump = std::max(basisJump, std::abs(curMatrix[r][c] - prevMatrix[r][c]));
+                            scaleSize = std::max(scaleSize, std::max(std::abs(curMatrix[r][c]), std::abs(prevMatrix[r][c])));
+                        }
+                    }
+
+                    const hlslpp::float3 move = curMatrix[3].xyz - prevMatrix[3].xyz;
+                    const float moveJump = std::sqrt(hlslpp::dot(move, move));
+                    const bool jumped = (basisJump > std::max(scaleSize, 0.05f)) || (moveJump > 200.0f);
+                    if (jumped) {
+                        static const bool trace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+                        if (trace) {
+                            fprintf(stderr, "[INTERP] not blended: ID %08X turned %.2f (of %.2f) moved %.1f\n", curIt->first, basisJump, scaleSize, moveJump);
+                        }
+                    }
+                    else {
+                        matchTransform(curWorkload, prevWorkload, curWorkloadMap, prevWorkloadMap, curIt->second, prevIt->second, modifiedBuffers);
+                    }
+
                     curIt++;
                     prevIt++;
                 }
