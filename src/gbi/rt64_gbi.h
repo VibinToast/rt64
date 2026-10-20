@@ -29,6 +29,7 @@ namespace RT64 {
         S2DEX2,
         L3DEX2,
         F3DDKR,
+        F3DJFG, // JFG PORT: Jet Force Gemini's revision of F3DDKR
         Count
     };
 

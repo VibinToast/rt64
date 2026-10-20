@@ -104,6 +104,7 @@ namespace RT64 {
         DKR.vertexCursor = 0;
         DKR.billboard = false;
         DKR.force8MBAddressMask = false;
+        DKR.jfg = false;
 
         clearExtended();
     }
@@ -238,6 +239,24 @@ namespace RT64 {
         selectMatrixDKR(index);
     }
 
+    // JFG PORT: Jet Force Gemini's G_MTX (microcode handler at IMEM 0x13A8). The parameter byte is
+    //   bit 7     : 0 = load the matrix into the destination slot, 1 = multiply
+    //   bits 3..5 : source slot (multiply only)
+    //   bits 0..2 : destination slot, which also becomes the active matrix
+    // Multiply computes destination = new matrix * source slot (the standard Fast3D routine: the new matrix is
+    // applied first).
+    void RSP::matrixJFG(uint32_t address, uint8_t param) {
+        const uint8_t dst = param & 0x7;
+        const uint8_t src = (param >> 3) & 0x7;
+        const uint32_t rdramAddress = maskPhysicalAddress<0x00FFFFF8>(DKR.matrixOffset + fromSegmented(address));
+        const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
+        const hlslpp::float4x4 loaded = fixedMatrix->toMatrix4x4();
+        DKR.matrices[dst] = (param & 0x80) ? hlslpp::mul(loaded, DKR.matrices[src]) : loaded;
+        DKR.segmentedAddresses[dst] = address;
+        DKR.physicalAddresses[dst] = rdramAddress;
+        selectMatrixDKR(dst);
+    }
+
     void RSP::selectMatrixDKR(uint8_t index) {
         if (index >= DKR.matrices.size()) {
             assert(false && "F3DDKR matrix index is invalid.");
@@ -315,6 +334,21 @@ namespace RT64 {
 
     uint32_t RSP::textureImageAddressDKR(uint8_t fmt, uint32_t address) {
         uint32_t physicalAddress = maskPhysicalAddress<0x00FFFFFF>(fromSegmented(address));
+        if (DKR.jfg) {
+            // JFG PORT: Jet Force Gemini's microcode (handler at IMEM 0x1328) is simpler than DKR's. The texture
+            // offset command copies 32 16-bit offsets into DMEM and sets a flag; from then on EVERY G_SETTIMG,
+            // whatever its format, adds the next offset to its address. Only G_DMAOFFSETS clears the flag.
+            // Animated textures (force fields, weapon reticles, ...) depend on this to select their frame.
+            if ((DKR.textureOffset != 0) && (DKR.textureCount < 32)) {
+                const uint32_t shiftAddress = DKR.textureOffset + DKR.textureCount * sizeof(uint16_t);
+                DKR.textureShift = *reinterpret_cast<const uint16_t *>(state->fromRDRAM(shiftAddress ^ 0x2));
+                DKR.textureCount++;
+                physicalAddress += DKR.textureShift;
+            }
+
+            return physicalAddress;
+        }
+
         if (DKR.textureOffset != 0) {
             if (fmt == G_IM_FMT_RGBA) {
                 const uint32_t shiftAddress = DKR.textureOffset + DKR.textureCount * sizeof(uint16_t);
@@ -332,7 +366,7 @@ namespace RT64 {
     }
 
     void RSP::loadBlockDKR(uint16_t lrs) {
-        if (DKR.textureOffset == 0) {
+        if (DKR.jfg || (DKR.textureOffset == 0)) {
             return;
         }
 
@@ -517,7 +551,7 @@ namespace RT64 {
         setVertexCommon<true, sizeof(Vertex)>(rdramAddress, dstIndex, dstIndex + vtxCount);
     }
 
-    void RSP::setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t sourceOffset, bool append) {
+    void RSP::setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t sourceOffset, bool append, int32_t dstIndexJFG) {
         // Microcode-verified placement rule (DMEM 0x14C cursor): a non-append
         // load always writes to slot 0 and sets the cursor to its count; an
         // append load writes to the cursor and leaves it unchanged. This is
@@ -525,7 +559,14 @@ namespace RT64 {
         // vertices contiguously, and how sprites reuse slots 1..n across
         // triangle batches while slot 0 keeps the anchor vertex.
         uint32_t dstIndex;
-        if (!append) {
+        if (dstIndexJFG >= 0) {
+            // JFG PORT: Jet Force Gemini's revision has no vertex cursor; the command names its destination slot.
+            // The billboard anchor (slot 0) is added whenever billboarding is on, so treat any load that does not
+            // start at slot 0 like DKR's append case below.
+            dstIndex = uint32_t(dstIndexJFG);
+            append = (dstIndex != 0);
+        }
+        else if (!append) {
             dstIndex = 0;
             DKR.vertexCursor = uint8_t(vtxCount);
         }
@@ -1170,6 +1211,15 @@ namespace RT64 {
         viewport.translate.y = float(vp->vtrans[0] + offy) / 4.0f;
         viewport.translate.z = float(vp->vtrans[3]) / DepthRange;
         extended.viewportOriginStack[viewportStackSize - 1] = ori;
+        static const bool vpTrace = std::getenv("RT64_VI_TRACE") != nullptr;
+        if (vpTrace) {
+            static float last[4] = {};
+            const float now[4] = { viewport.scale.x, viewport.scale.y, viewport.translate.x, viewport.translate.y };
+            if (memcmp(last, now, sizeof(now)) != 0) {
+                memcpy(last, now, sizeof(now));
+                fprintf(stderr, "[VP] scale %g %g translate %g %g (ori %u off %d %d)\n", now[0], now[1], now[2], now[3], ori, offx, offy);
+            }
+        }
         viewportChanged = true;
     }
 
@@ -1415,7 +1465,12 @@ namespace RT64 {
             drawRect = viewportClipRect.intersection(scissorRect.intersection(drawRect));
             if (!drawRect.isNull()) {
                 fbPair.drawColorRect.merge(drawRect);
-                if (otherModeStack[otherModeStackSize - 1].zUpd()) {
+                // JFG PORT: Jet Force Gemini sets its render modes with G_RDPSETOTHERMODE, which only reaches the RDP
+                // state, so the RSP copy never had Z update on and no depth was ever written back to RDRAM. The game
+                // reads its Z buffer on the CPU (mainUpdateZBCheck) to hide lens flares behind scenery; with a buffer
+                // that only ever held the clear value, flares showed through everything. The RDP state is the one
+                // the draw actually uses.
+                if (otherModeStack[otherModeStackSize - 1].zUpd() || state->rdp->otherMode.zUpd()) {
                     fbPair.drawDepthRect.merge(drawRect);
                 }
             }
