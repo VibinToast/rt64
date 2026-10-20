@@ -79,6 +79,9 @@ namespace RT64 {
         std::mutex workerMutex;
         std::mutex threadMutex;
         std::atomic<bool> threadsRunning = false;
+        // JFG PORT: the present queue is waiting for a workload that is not done yet (written under interpolatedMutex).
+        // It has finished every earlier present, so interpolated frames still counted as available will never be shown.
+        bool jfgPresentBlocked = false;
         std::atomic<bool> rtEnabled = false;
         std::atomic<bool> ubershadersOnly = false;
         std::atomic<bool> ubershadersVisible = false;
@@ -97,9 +100,13 @@ namespace RT64 {
         ProfilingTimer rendererGPUProfiler = ProfilingTimer(120);
         ProfilingTimer matchingProfiler = ProfilingTimer(120);
         ProfilingTimer workloadProfiler = ProfilingTimer(120);
-        std::array<GameFrame, 2> gameFrames;
+        // JFG PORT: three frames, so the last screen frame can be kept as the one to match against while an off-screen
+        // workload (one that draws no screen-sized image, see renderThreadLoop) takes a frame of its own.
+        std::array<GameFrame, 3> gameFrames;
         uint32_t prevFrameIndex = uint32_t(gameFrames.size()) - 1;
         uint32_t curFrameIndex = 0;
+        int32_t jfgHeldFrameIndex = -1; // the screen frame kept while an off-screen workload runs, -1 = none
+        bool jfgBarrierOwed = false;    // its workload is kept too: the barrier advances twice after the next one
 
         WorkloadQueue();
         ~WorkloadQueue();
@@ -108,7 +115,7 @@ namespace RT64 {
         void repeatLastWorkload();
         uint32_t previousWriteCursor() const;
         void waitForIdle();
-        void waitForWorkloadId(uint64_t waitId);
+        void waitForWorkloadId(uint64_t waitId, bool presentQueue = false); // JFG PORT: presentQueue, see jfgPresentBlocked
         void setup(const External &ext);
         void updateMultisampling();
         void threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig);

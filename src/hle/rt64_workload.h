@@ -48,6 +48,7 @@ namespace RT64 {
         std::vector<interop::float4x4> modViewTransforms;
         std::vector<interop::float4x4> modProjTransforms;
         std::vector<interop::float4x4> modViewProjTransforms;
+        std::vector<uint8_t> jfgProjAdjusted; // JFG PORT: 1 = the projection processor widened this transform (see rt64_projection_processor.cpp)
         std::vector<interop::float4x4> prevViewTransforms;
         std::vector<interop::float4x4> prevProjTransforms;
         std::vector<interop::float4x4> prevViewProjTransforms;

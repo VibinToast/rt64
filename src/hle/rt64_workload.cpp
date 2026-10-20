@@ -80,6 +80,7 @@ namespace RT64 {
         drawData.modViewTransforms.clear();
         drawData.modProjTransforms.clear();
         drawData.modViewProjTransforms.clear();
+        drawData.jfgProjAdjusted.clear(); // JFG PORT
         drawData.prevViewTransforms.clear();
         drawData.prevProjTransforms.clear();
         drawData.prevViewProjTransforms.clear();

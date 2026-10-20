@@ -2,12 +2,16 @@
 // RT64
 //
 
+#include <atomic>
 #include "rt64_present_queue.h"
 
 #include "common/rt64_thread.h"
 #include "rhi/rt64_render_hooks.h"
 
 #include "rt64_workload_queue.h"
+
+// JFG PORT: number of frames handed to the swap chain, read by the "Show FPS" display (src/jfg/jfg_frame_rate.cpp).
+std::atomic<uint32_t> rt64_jfg_present_count{ 0 };
 
 namespace RT64 {
     // PresentQueue
@@ -402,6 +406,7 @@ namespace RT64 {
                 RenderCommandSemaphore *waitSemaphore = drawSemaphores[swapChainIndex].get();
                 presentTimestamp = Timer::current();
                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
+                rt64_jfg_present_count.fetch_add(1, std::memory_order_relaxed); // JFG PORT: for the port's FPS display
                 presentProfiler.logAndRestart();
             }
         }
@@ -505,7 +510,7 @@ namespace RT64 {
                 skipPresent = skipPresent || ext.swapChain->isEmpty();
 
                 Present &present = presents[processCursor];
-                ext.workloadQueue->waitForWorkloadId(present.workloadId);
+                ext.workloadQueue->waitForWorkloadId(present.workloadId, true); // JFG PORT: see jfgPresentBlocked
 
                 if (!presentThreadRunning) {
                     continue;

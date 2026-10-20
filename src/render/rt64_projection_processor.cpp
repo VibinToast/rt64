@@ -39,6 +39,7 @@ namespace RT64 {
             drawData.prevViewTransforms = drawData.viewTransforms;
             drawData.prevProjTransforms = drawData.projTransforms;
             drawData.prevViewProjTransforms = drawData.viewProjTransforms;
+            drawData.jfgProjAdjusted.assign(drawData.projTransforms.size(), 0); // JFG PORT
         }
 
         for (size_t s = 0; s < p.curFrame->perspectiveScenes.size(); s++) {
@@ -92,12 +93,23 @@ namespace RT64 {
                 }
 
                 if (!intersectionRect.isEmpty()) {
-                    bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+                    bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx + 4 >= fbPair.scissorRect.lrx); // JFG PORT: the game scissors to 319 inclusive (one pixel short)
                     bool horizontalRatio = (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                     adjustAspectRatio = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                 }
             }
- 
+
+            // JFG PORT: projections that differ only in scissor share their transforms (the Tribal counter's heads are
+            // drawn under a narrow scissor with the HUD's full-width ortho). The matrix is shared, so the last one
+            // processed used to decide for all of them; now it stays widened once any of them is. The renderer reads
+            // jfgProjAdjusted to place a narrow one sharing a widened matrix (see FramebufferRenderer).
+            if (proj.transformsIndex < drawData.jfgProjAdjusted.size()) {
+                adjustAspectRatio = adjustAspectRatio || (drawData.jfgProjAdjusted[proj.transformsIndex] != 0);
+                if (adjustAspectRatio) {
+                    drawData.jfgProjAdjusted[proj.transformsIndex] = 1;
+                }
+            }
+
             float projRatioScale = adjustAspectRatio ? (1.0f / p.aspectRatioScale) : 1.0f;
             interop::float4x4 &viewMatrix = drawData.modViewTransforms[proj.transformsIndex];
             interop::float4x4 &projMatrix = drawData.modProjTransforms[proj.transformsIndex];

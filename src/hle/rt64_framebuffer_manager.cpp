@@ -6,6 +6,8 @@
 
 #include <cassert>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 #include "xxHash/xxh3.h"
 
@@ -127,6 +129,7 @@ namespace RT64 {
         const uint32_t tileHeight = std::clamp<long>(lround((fbTile.bottom - fbTile.top) * resolutionScale.y), 1L, RenderTarget::MaxDimension);
         tileCopy.id = op.createTileCopy.id;
         tileCopy.address = op.createTileCopy.address;
+        tileCopy.jfgSmallSource = (fbIt->second.width <= 128); // JFG PORT: see GPUTileFlags::jfgSoft
         tileCopy.usedWidth = tileWidth;
         tileCopy.usedHeight = tileHeight;
         tileCopy.left = std::clamp<long>(lround(fbTile.left * resolutionScale.x), 0, RenderTarget::MaxDimension);
@@ -294,6 +297,7 @@ namespace RT64 {
 
         TileCopy &dstTile = tileCopies[op.reinterpretTile.dstId];
         dstTile.id = op.reinterpretTile.dstId;
+        dstTile.jfgSmallSource = srcTile.jfgSmallSource; // JFG PORT
         dstTile.ulScaleS = op.reinterpretTile.ulScaleS;
         dstTile.ulScaleS = op.reinterpretTile.ulScaleS;
         dstTile.texelShift = op.reinterpretTile.texelShift;
@@ -843,15 +847,33 @@ namespace RT64 {
         }
     }
 
+    static const bool jfgSmallNoRAM = std::getenv("RT64_JFG_SMALL_FB_RAM") == nullptr; // JFG PORT: see checkRAM
+
     void FramebufferManager::checkRAM(const uint8_t *RDRAM, std::vector<Framebuffer *> &differentFbs, bool updateHashes) {
         assert(RDRAM != nullptr);
 
         differentFbs.clear();
+        // JFG PORT: memory changes of small framebuffers (128 pixels wide or less: render to texture) are not pasted into
+        // them. The paste is at native resolution: Jet Force Gemini renders each character's shadow into a 64x64 8-bit
+        // framebuffer, its memory changed every frame by about the silhouette's size (under the quarter that discards a
+        // framebuffer), and the shadow drawn from RT64's high-resolution copy came out blocky. Without the paste it is drawn
+        // at full resolution, with no trails (2026-10-18). Full-size framebuffers keep it (CPU-drawn reticles need it).
+        // The changes still go through uploadRAM, which skips only the paste: memory reused for something else (a quarter or
+        // more of it changed) still discards the framebuffer. Skipping that too left an old shadow picture drawn as a black
+        // box of blurred silhouettes in place of a texture later loaded there (Lee Walkway, 2026-10-18).
+        // RT64_JFG_SMALL_FB_RAM=1 pastes as before; RT64_JFG_SHADOW_LOG=1 logs these changes.
+        static const bool jfgShadowLog = std::getenv("RT64_JFG_SHADOW_LOG") != nullptr;
+        static uint32_t jfgShadowLogged = 0;
         auto it = framebuffers.begin();
         while (it != framebuffers.end()) {
             const uint8_t *fbRAM = &RDRAM[it->first];
             uint64_t currentHash = XXH3_64bits(fbRAM, it->second.RAMBytes);
             if (currentHash != it->second.RAMHash) {
+                if ((it->second.width <= 128) && jfgShadowLog && (jfgShadowLogged++ < 200)) {
+                    fprintf(stderr, "[RT64 shadow] RAM of fb %06X %ux%u changed (modified so far %u)%s\n", it->first, it->second.width, it->second.height,
+                        it->second.modifiedBytes, jfgSmallNoRAM ? ", not pasted" : "");
+                }
+
                 differentFbs.push_back(&it->second);
 
                 if (updateHashes) {
@@ -887,6 +909,12 @@ namespace RT64 {
             const bool discardFb = canDiscard && (fb->modifiedBytes >= differentBytesLimit);
             if (discardFb) {
                 fbDiscards.emplace_back(fb->addressStart);
+                if ((fb->width <= 128) && (std::getenv("RT64_JFG_SHADOW_LOG") != nullptr)) {
+                    fprintf(stderr, "[RT64 shadow] fb %06X %ux%u discarded (%u of %u bytes changed)\n", fb->addressStart, fb->width, fb->height, fb->modifiedBytes, fb->RAMBytes);
+                }
+            }
+            else if (jfgSmallNoRAM && (fb->width <= 128)) {
+                // JFG PORT: small framebuffers are not pasted into (see checkRAM).
             }
             else {
                 FramebufferOperation changesOp;

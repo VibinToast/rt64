@@ -50,6 +50,8 @@ namespace RT64 {
         barrierCursor = int(workloads.size()) - 1;
         workloadId = 0;
         lastPresentId = 0;
+        jfgHeldFrameIndex = -1; // JFG PORT
+        jfgBarrierOwed = false;
     }
 
     void WorkloadQueue::advanceToNextWorkload() {
@@ -93,11 +95,29 @@ namespace RT64 {
         std::unique_lock<std::mutex> threadLock(threadMutex);
     }
 
-    void WorkloadQueue::waitForWorkloadId(uint64_t waitId) {
+    void WorkloadQueue::waitForWorkloadId(uint64_t waitId, bool presentQueue) {
         std::unique_lock<std::mutex> workloadLock(workloadIdMutex);
+        // JFG PORT: tell a configuration update waiting for interpolated frames that the present queue will not get to
+        // them (threadConfigurationUpdate); it froze the game at start-up when the previous present showed fewer
+        // interpolated frames than were made.
+        const bool blocks = presentQueue && (waitId > workloadId) && threadsRunning;
+        if (blocks) {
+            {
+                std::scoped_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
+                jfgPresentBlocked = true;
+            }
+
+            ext.sharedResources->interpolatedCondition.notify_all();
+        }
+
         workloadIdCondition.wait(workloadLock, [&]() {
             return (waitId <= workloadId) || !threadsRunning;
         });
+
+        if (blocks) {
+            std::scoped_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
+            jfgPresentBlocked = false;
+        }
     }
 
     void WorkloadQueue::setup(const External &ext) {
@@ -126,7 +146,7 @@ namespace RT64 {
     }
 
     void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
-        const std::scoped_lock lock(ext.sharedResources->configurationMutex);
+        std::unique_lock<std::mutex> lock(ext.sharedResources->configurationMutex); // JFG PORT: released while waiting below
         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
         ext.sharedResources->swapChainSizeChanged = false;
         
@@ -261,11 +281,17 @@ namespace RT64 {
         if (ext.sharedResources->fbConfigChanged || sizeChanged) {
             {
                 // Wait until the other queue has stopped using the interpolated color targets.
+                // JFG PORT: without the configuration lock. The present queue takes it after resizing the swap chain
+                // (setSwapChainSize), before it presents those frames: holding it here froze the game when the window
+                // changed size (going fullscreen) with interpolated frames queued.
+                lock.unlock();
                 std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
                 InterpolatedFrameCounters &curFrameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
                 ext.sharedResources->interpolatedCondition.wait(interpolatedLock, [&]() {
-                    return curFrameCounters.presented >= curFrameCounters.available;
+                    return (curFrameCounters.presented >= curFrameCounters.available) || jfgPresentBlocked;
                 });
+                interpolatedLock.unlock();
+                lock.lock();
             }
 
             std::scoped_lock<std::mutex> managerLock(ext.sharedResources->managerMutex);
@@ -811,7 +837,7 @@ namespace RT64 {
                     }
 
                     // Do the resolve if using MSAA while target override is active and we're on the correct framebuffer pair index.
-                    if (usingMSAA && (overrideTarget != nullptr) && ((uint32_t)overrideTargetFbPairIndex == f)) {
+                    if (usingMSAA && (overrideTarget != nullptr) && (colorTarget != nullptr) && ((uint32_t)overrideTargetFbPairIndex == f)) { // JFG: colorTarget check
                         overrideTarget->resize(ext.workloadGraphicsWorker, colorTarget->width, colorTarget->height);
                         overrideTarget->resolveFromTarget(ext.workloadGraphicsWorker, colorTarget, ext.shaderLibrary);
                     }
@@ -971,10 +997,49 @@ namespace RT64 {
                 workloadProfiler.start();
                 threadConfigurationUpdate(workload.viFbSize, workloadConfig);
 
+                // JFG PORT: an off-screen workload draws only into images narrower than the screen (Jet Force Gemini draws its
+                // character shadow texture, 64 wide, as a task of its own before each frame). RT64 takes one workload as one
+                // frame, so in a level every screen frame was matched against the shadow texture instead of the screen frame
+                // before it, and the shadow workload, which has nothing to interpolate, reset the tick count: interpolation
+                // never added a frame (screen rate stayed at the game's 60). An off-screen workload now leaves the tick count
+                // and the interpolated frame counters alone, and the screen frame before it is kept to match the next one
+                // against (with its workload: the barrier waits, once).
+                bool jfgHoldBarrier = false;
+                bool jfgOffscreen = !workload.paused && (workload.fbPairCount > 0) && (workload.viFbSize.x > 0);
+                for (uint32_t f = 0; jfgOffscreen && (f < workload.fbPairCount); f++) {
+                    if (workload.fbPairs[f].colorImage.width >= workload.viFbSize.x) {
+                        jfgOffscreen = false;
+                    }
+                }
+
                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
-                    prevFrameIndex = curFrameIndex;
-                    curFrameIndex = (curFrameIndex + 1) % gameFrames.size();
+                    uint32_t jfgMatchIndex = curFrameIndex;
+                    if (jfgOffscreen) {
+                        // Hold the screen frame before it. A second off-screen workload in a row lets it go: the barrier is
+                        // only ever held back by one workload.
+                        if ((jfgHeldFrameIndex < 0) && !gameFrames[curFrameIndex].workloads.empty()) {
+                            jfgHeldFrameIndex = int32_t(curFrameIndex);
+                            jfgHoldBarrier = true;
+                        }
+                        else {
+                            jfgHeldFrameIndex = -1;
+                        }
+                    }
+                    else if (jfgHeldFrameIndex >= 0) {
+                        jfgMatchIndex = uint32_t(jfgHeldFrameIndex);
+                    }
+
+                    uint32_t nextFrameIndex = (curFrameIndex + 1) % gameFrames.size();
+                    if (int32_t(nextFrameIndex) == jfgHeldFrameIndex) {
+                        nextFrameIndex = (nextFrameIndex + 1) % gameFrames.size();
+                    }
+
+                    prevFrameIndex = jfgMatchIndex;
+                    curFrameIndex = nextFrameIndex;
+                    if (!jfgOffscreen) {
+                        jfgHeldFrameIndex = -1;
+                    }
                 }
                 
                 // TODO: The frame detection needs to be more elaborate than just matching one workload to one frame.
@@ -997,6 +1062,13 @@ namespace RT64 {
                         const FramebufferPair &fbPair = workload.fbPairs[f];
                         bool interpolationCandidate = fbPair.earlyPresentCandidate();
                         if (fbPair.drawColorRect.isEmpty()) {
+                            continue;
+                        }
+
+                        // JFG: a pass that only clears the depth buffer (its color image is the depth buffer) has no
+                        // color target. When the depth buffer sat where a shown picture used to be, it was chosen for
+                        // interpolation and the MSAA resolve below read its missing color target (crash in a cutscene).
+                        if (fbPair.fastPaths.clearDepthOnly) {
                             continue;
                         }
 
@@ -1046,7 +1118,7 @@ namespace RT64 {
                     generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty();
 
                     const bool resetTicks = !generateInterpolatedFrames || (originalRateForTicks != workload.viOriginalRate) || (displayRateForTicks != workloadConfig.targetRate) || !displayRateAboveOriginal;
-                    if (resetTicks) {
+                    if (resetTicks && !jfgOffscreen) { // JFG PORT: !jfgOffscreen
                         logicalTicks = 0;
                         displayTicks = 0;
                         originalRateForTicks = workload.viOriginalRate;
@@ -1078,8 +1150,11 @@ namespace RT64 {
                 ext.sharedResources->viOriginalRate = workload.viOriginalRate;
                 
                 // Get the current and previous set of frame counters. The other set can be in use by the present queue. Skip if no new present event has arrived before this workload event.
-                InterpolatedFrameCounters &prevFrameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
-                const bool useDifferentCounters = (lastPresentId != workload.presentId);
+                // JFG PORT: an off-screen workload gets counters of its own: the shared ones belong to the screen frames (taking
+                // them would let the next screen frame draw over interpolated frames that are still being presented).
+                InterpolatedFrameCounters jfgOffscreenCounters;
+                InterpolatedFrameCounters &prevFrameCounters = jfgOffscreen ? jfgOffscreenCounters : ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
+                const bool useDifferentCounters = !jfgOffscreen && (lastPresentId != workload.presentId);
                 if (useDifferentCounters) {
                     ext.sharedResources->interpolatedFramesIndex = ext.sharedResources->interpolatedFramesIndex ^ 1;
                     lastPresentId = workload.presentId;
@@ -1093,7 +1168,7 @@ namespace RT64 {
                     });
                 }
 
-                InterpolatedFrameCounters &curFrameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
+                InterpolatedFrameCounters &curFrameCounters = jfgOffscreen ? jfgOffscreenCounters : ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
                 curFrameCounters.skipped = false;
                 curFrameCounters.presented = 0;
                 curFrameCounters.available = 0;
@@ -1222,7 +1297,18 @@ namespace RT64 {
                 threadConfigurationValidate();
 
                 if (!workload.paused) {
-                    threadAdvanceBarrier();
+                    // JFG PORT: an off-screen workload that holds the screen frame before it leaves the barrier on that
+                    // frame's workload; the next one catches up.
+                    if (jfgHoldBarrier) {
+                        jfgBarrierOwed = true;
+                    }
+                    else {
+                        threadAdvanceBarrier();
+                        if (jfgBarrierOwed) {
+                            jfgBarrierOwed = false;
+                            threadAdvanceBarrier();
+                        }
+                    }
                 }
 
                 processCursor = -1;
