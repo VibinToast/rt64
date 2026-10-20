@@ -18,5 +18,6 @@
 namespace RT64 {
     namespace GBI_F3DDKR {
         void setup(GBI *gbi);
+        void setupJFG(GBI *gbi);
     };
 };

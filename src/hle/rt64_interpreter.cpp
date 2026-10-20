@@ -113,6 +113,24 @@ namespace RT64 {
             return false;
         }
 
+        {   // JFG port debug aid: RT64_OP_TRACE=1 prints an opcode histogram per display list.
+            static const bool opTrace = std::getenv("RT64_OP_TRACE") != nullptr;
+            if (opTrace) {
+                static uint32_t hist[256] = {};
+                static uint32_t lastRoot = 0;
+                if (rootAddress != lastRoot || commandCount == 0) {
+                    if (lastRoot != 0) {
+                        fprintf(stderr, "[OPS]");
+                        for (int i = 0; i < 256; i++) if (hist[i] != 0) fprintf(stderr, " %02X:%u", i, hist[i]);
+                        fprintf(stderr, "\n");
+                    }
+                    memset(hist, 0, sizeof(hist));
+                    lastRoot = rootAddress;
+                }
+                hist[uint8_t(dl->w0 >> 24)]++;
+            }
+        }
+
         commandCount++;
         if (fromDMA) {
             dmaExecutedCommandCount++;
@@ -532,7 +550,7 @@ namespace RT64 {
         // Check RDRAM if required.
         state->checkRDRAM();
 
-        dkrDiagnostics.begin(state, dlStartAdddress, hleGBI->ucode == GBIUCode::F3DDKR);
+        dkrDiagnostics.begin(state, dlStartAdddress, (hleGBI->ucode == GBIUCode::F3DDKR) || (hleGBI->ucode == GBIUCode::F3DJFG));
 
         // Every RSP task starts with an empty display-list stack on hardware.
         // A malformed or torn display list that aborted mid-run can leave

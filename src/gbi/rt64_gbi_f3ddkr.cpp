@@ -4,6 +4,9 @@
 
 #include "rt64_gbi_f3ddkr.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "hle/rt64_interpreter.h"
 #include "hle/rt64_rdp.h"
 #include "rt64_gbi_f3d.h"
@@ -56,10 +59,79 @@ namespace RT64 {
             const uint32_t address = state->rsp->fromSegmentedMasked((*dl)->w1);
 
             auto &texture = state->rsp->textureState;
-            state->rsp->setTexture(texture.tile, texture.levels, textureOn, texture.sc, texture.tc);
+            // JFG PORT: setTexture() stores level + 1, so passing the stored value back raised the level count by one
+            // for every triangle batch. A draw call using LOD then claimed up to 255 tiles and overran fixed 8-entry
+            // arrays (stack corruption in State::fullSync).
+            state->rsp->setTexture(texture.tile, (texture.levels > 0) ? uint8_t(texture.levels - 1) : 0, textureOn, texture.sc, texture.tc);
 
             uint32_t drawnCount = 0;
             uint32_t skippedCount = 0;
+            // debug aids: batch index within the current display list; RT64_SKIP_TRIS="lo,hi" skips batches lo..hi-1.
+            static uint32_t dbgLastRoot = 0, dbgIndex = 0;
+            {
+                const uint32_t root = state->ext.interpreter->dkrDiagnostics.rootAddress;
+                if (root != dbgLastRoot) { dbgLastRoot = root; dbgIndex = 0; }
+                else dbgIndex++;
+                static const char *sk = std::getenv("RT64_SKIP_TRIS");
+                if (sk != nullptr) {
+                    static int lo = 0, hi = 0, parsed = 0;
+                    if (!parsed) { sscanf(sk, "%d,%d", &lo, &hi); parsed = 1; }
+                    if (int(dbgIndex) >= lo && int(dbgIndex) < hi) {
+                        static uint32_t printed = 0;
+                        if (printed++ % 97 == 0) {
+                            const auto &t0 = state->rdp->tiles[state->rsp->textureState.tile & 7];
+                            const uint8_t vi = readU8(state, address + 1);
+                            const auto &v = state->rsp->vertices[vi < RSP_MAX_VERTICES ? vi : 0];
+                            fprintf(stderr, "[SKIP] #%u root=%06X slot=%u bb=%d n=%u tris@%06X timg=%06X fmt=%u siz=%u %ux%u v=(%d,%d,%d) om=%08X:%08X\n", dbgIndex, root, uint32_t(state->rsp->DKR.activeMatrix), int(state->rsp->DKR.billboard), count, address, state->rdp->texture.address, t0.fmt, t0.siz, (t0.lrs >> 2) + 1, (t0.lrt >> 2) + 1, v.x, v.y, v.z, uint32_t(state->rdp->otherMode.H), uint32_t(state->rdp->otherMode.L));
+                        }
+                        return;
+                    }
+                }
+            }
+            static const bool triTrace = std::getenv("RT64_TRI_TRACE") != nullptr; // debug aid
+            if (triTrace) {
+                const auto &m = state->rsp->DKR.matrices[state->rsp->DKR.activeMatrix];
+                float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, w0 = 1e9f, w1 = -1e9f;
+                uint32_t col = 0;
+                for (uint32_t i = 0; i < count; i++) {
+                    for (uint32_t k = 1; k <= 3; k++) {
+                        const uint8_t vi = readU8(state, address + i * 16 + k);
+                        if (vi >= RSP_MAX_VERTICES) continue;
+                        const auto &v = state->rsp->vertices[vi];
+                        const hlslpp::float4 c = hlslpp::mul(hlslpp::float4(float(v.x), float(v.y), float(v.z), 1.0f), m);
+                        const float w = c[3];
+                        w0 = std::min(w0, w); w1 = std::max(w1, w);
+                        if (w > 0.01f) { const float nx = float(c[0]) / w, ny = float(c[1]) / w; x0 = std::min(x0, nx); x1 = std::max(x1, nx); y0 = std::min(y0, ny); y1 = std::max(y1, ny); }
+                        col = (uint32_t(v.color.r) << 24) | (uint32_t(v.color.g) << 16) | (uint32_t(v.color.b) << 8) | v.color.a;
+                    }
+                }
+                fprintf(stderr, "[TRI] #%u slot=%u bb=%d tex=%u n=%u x[%.2f,%.2f] y[%.2f,%.2f] w[%.1f,%.1f] col=%08X tris@%08X om=%08X:%08X geom=%08X\n", dbgIndex, uint32_t(state->rsp->DKR.activeMatrix), int(state->rsp->DKR.billboard), uint32_t(textureOn), count, x0, x1, y0, y1, w0, w1, col, address, uint32_t(state->rdp->otherMode.H), uint32_t(state->rdp->otherMode.L), uint32_t(state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1]));
+                {
+                    const auto &t0 = state->rdp->tiles[state->rsp->textureState.tile & 7];
+                    const auto &t7 = state->rdp->tiles[7];
+                    fprintf(stderr, "[TEX] timg=%06X tile%u fmt=%u siz=%u line=%u tmem=%u pal=%u cm=%u/%u mask=%u/%u size %u,%u-%u,%u | load fmt=%u siz=%u line=%u size %u,%u-%u,%u | texOff=%06X cnt=%u shift=%u sc=%04X tc=%04X\n", state->rdp->texture.address, uint32_t(state->rsp->textureState.tile), t0.fmt, t0.siz, t0.line, t0.tmem, t0.palette, t0.cms, t0.cmt, t0.masks, t0.maskt, t0.uls, t0.ult, t0.lrs, t0.lrt, t7.fmt, t7.siz, t7.line, t7.uls, t7.ult, t7.lrs, t7.lrt, state->rsp->DKR.textureOffset, state->rsp->DKR.textureCount, state->rsp->DKR.textureShift, uint32_t(state->rsp->textureState.sc), uint32_t(state->rsp->textureState.tc));
+                    if (state->rsp->DKR.billboard) {
+                        const auto &v0 = state->rsp->vertices[0];
+                        const auto &mm = state->rsp->DKR.matrices[state->rsp->DKR.activeMatrix];
+                        const auto &m0 = state->rsp->DKR.matrices[0];
+                        const hlslpp::float4 c0 = hlslpp::mul(hlslpp::float4(float(v0.x), float(v0.y), float(v0.z), 1.0f), m0);
+                        fprintf(stderr, "[ANC] v0=(%d,%d,%d) rgba=%02X%02X%02X%02X viaM0=(%g,%g,%g,%g) active diag=(%g,%g) tr=(%g,%g,%g,%g)\n", v0.x, v0.y, v0.z, v0.color.r, v0.color.g, v0.color.b, v0.color.a,
+                            float(c0[0]), float(c0[1]), float(c0[2]), float(c0[3]), float(mm[0][0]), float(mm[1][1]), float(mm[3][0]), float(mm[3][1]), float(mm[3][2]), float(mm[3][3]));
+                    }
+                    if (state->rsp->DKR.billboard && t0.siz == 2) {
+                        const uint32_t w = (t0.lrs >> 2) + 1, h = (t0.lrt >> 2) + 1, base = state->rdp->texture.address & 0x7FFFFF;
+                        uint32_t opaque = 0, nonzero = 0;
+                        for (uint32_t i = 0; i < w * h && i < 4096; i++) {
+                            const uint16_t v = *reinterpret_cast<const uint16_t *>(state->fromRDRAM((base + i * 2) ^ 2));
+                            opaque += v & 1; nonzero += (v != 0);
+                        }
+                        fprintf(stderr, "[TXD] %ux%u opaque=%u nonzero=%u prim=%g,%g,%g,%g env=%g,%g,%g,%g cc=%08X:%08X\n", w, h, opaque, nonzero,
+                            float(state->rdp->primColorStack[state->rdp->primColorStackSize - 1][0]), float(state->rdp->primColorStack[state->rdp->primColorStackSize - 1][1]), float(state->rdp->primColorStack[state->rdp->primColorStackSize - 1][2]), float(state->rdp->primColorStack[state->rdp->primColorStackSize - 1][3]),
+                            float(state->rdp->envColorStack[state->rdp->envColorStackSize - 1][0]), float(state->rdp->envColorStack[state->rdp->envColorStackSize - 1][1]), float(state->rdp->envColorStack[state->rdp->envColorStackSize - 1][2]), float(state->rdp->envColorStack[state->rdp->envColorStackSize - 1][3]),
+                            uint32_t(state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1].H), uint32_t(state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1].L));
+                    }
+                }
+            }
             for (uint32_t i = 0; i < count; i++) {
                 const uint32_t triAddress = address + i * 16;
                 const uint8_t flags = readU8(state, triAddress + 0);
@@ -81,7 +153,7 @@ namespace RT64 {
 
                 const uint32_t cullMode = (flags & 0x40U)
                     ? 0
-                    : ((state->rsp->viewportStack[state->rsp->viewportStackSize - 1].scale.x > 0.0f)
+                    : (((state->rsp->viewportStack[state->rsp->viewportStackSize - 1].scale.x > 0.0f) != (state->rsp->DKR.jfg && state->rsp->DKR.jfgCullFlip))
                         ? (state->rsp->cullBothMask ^ state->rsp->cullFrontMask)
                         : state->rsp->cullFrontMask);
                 state->rsp->modifyGeometryMode(~state->rsp->cullBothMask, cullMode);
@@ -243,6 +315,111 @@ namespace RT64 {
             state->rsp->DKR.vertexCursor = 0;
             state->rsp->DKR.loadedVertices.reset();
             state->rsp->DKR.billboard = false;
+        }
+
+        // ---- JFG PORT: Jet Force Gemini's revision of the microcode -------------------------------------------
+        // Differences from DKR's, taken from a disassembly of the microcode in the US ROM (0x9FFD0):
+        //  * G_MTX: parameter byte selects destination/source slots (8 slots) and load vs multiply.
+        //  * G_VTX: count is bits 19-23 as is (not count - 1); the destination slot is bits 9-15 of w0;
+        //           there is no vertex cursor.
+        //  * G_MW_MTXOFFSET: the active matrix index has 3 bits.
+        //  * G_DMAOFFSETS also ends the per-texture DMA offset list.
+        static bool traceJFG() {
+            static const bool enabled = std::getenv("RT64_JFG_TRACE") != nullptr;
+            return enabled;
+        }
+
+        void matrixJFG(State *state, DisplayList **dl) {
+            state->rsp->matrixJFG((*dl)->w1, uint8_t((*dl)->p0(16, 8)));
+            if (traceJFG()) {
+                {
+                    const uint32_t raw = state->rsp->DKR.physicalAddresses[(*dl)->p0(16, 3)];
+                    fprintf(stderr, "[JFG-GFX] MTX raw@%08X (mtxOff=%X vtxOff=%X):", raw, state->rsp->DKR.matrixOffset, state->rsp->DKR.vertexOffset);
+                    for (uint32_t k = 0; k < 0x40; k += 2) fprintf(stderr, " %04X", uint16_t(readS16(state, raw + k)));
+                    fprintf(stderr, "\n");
+                }
+                const auto &m = state->rsp->DKR.matrices[(*dl)->p0(16, 3)];
+                fprintf(stderr, "[JFG-GFX] MTX w0=%08X w1=%08X  [%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n", (*dl)->w0, (*dl)->w1,
+                    float(m[0][0]), float(m[0][1]), float(m[0][2]), float(m[0][3]), float(m[1][0]), float(m[1][1]), float(m[1][2]), float(m[1][3]),
+                    float(m[2][0]), float(m[2][1]), float(m[2][2]), float(m[2][3]), float(m[3][0]), float(m[3][1]), float(m[3][2]), float(m[3][3]));
+            }
+        }
+
+        void vertexJFG(State *state, DisplayList **dl) {
+            const uint32_t count = (*dl)->p0(19, 5);
+            const uint32_t sourceOffset = ((*dl)->w0 >> 16) & 0x6U;
+            const uint32_t dstIndex = (*dl)->p0(9, 7);
+            if (count == 0) {
+                return;
+            }
+
+            state->ext.interpreter->dkrDiagnostics.noteVertexBatch(state, count);
+            if (state->ext.interpreter->dkrDiagnostics.shouldAbort()) {
+                return;
+            }
+
+            state->rsp->setVertexDKR((*dl)->w1, count, sourceOffset, false, int32_t(dstIndex));
+            if (traceJFG()) {
+                const auto &v = state->rsp->vertices[dstIndex];
+                fprintf(stderr, "[JFG-GFX] VTX w0=%08X w1=%08X n=%u dst=%u first=(%d %d %d) rgba=%02X%02X%02X%02X billboard=%d\n", (*dl)->w0, (*dl)->w1,
+                    count, dstIndex, v.x, v.y, v.z, v.color.r, v.color.g, v.color.b, v.color.a, int(state->rsp->DKR.billboard));
+            }
+        }
+
+        void moveWordJFG(State *state, DisplayList **dl) {
+            if (traceJFG()) {
+                fprintf(stderr, "[JFG-GFX] MW  w0=%08X w1=%08X\n", (*dl)->w0, (*dl)->w1);
+            }
+            if ((*dl)->p0(0, 8) == 0x0A) {
+                state->rsp->selectMatrixDKR((*dl)->p1(6, 3));
+            }
+            else {
+                moveWord(state, dl);
+            }
+        }
+
+        void dmaOffsetsJFG(State *state, DisplayList **dl) {
+            if (traceJFG()) {
+                fprintf(stderr, "[JFG-GFX] DMAOFFSETS w0=%08X w1=%08X\n", (*dl)->w0, (*dl)->w1);
+            }
+            dmaOffsets(state, dl);
+            state->rsp->DKR.textureOffset = 0;
+            state->rsp->DKR.textureShift = 0;
+            state->rsp->DKR.textureCount = 0;
+        }
+
+        // The microcode only rewrites the cull-back bit (0x2000) for each triangle. Bit 0x1000 of the geometry
+        // mode is left to the game, and when it is set the rasteriser culls the other side instead. The game sets
+        // it while it draws objects mirrored in a reflective floor, whose triangles are wound the other way round.
+        void setGeometryModeJFG(State *state, DisplayList **dl) {
+            if ((*dl)->w1 & 0x1000U) {
+                state->rsp->DKR.jfgCullFlip = true;
+            }
+            GBI_F3D::setGeometryMode(state, dl);
+        }
+
+        void clearGeometryModeJFG(State *state, DisplayList **dl) {
+            if ((*dl)->w1 & 0x1000U) {
+                state->rsp->DKR.jfgCullFlip = false;
+            }
+            GBI_F3D::clearGeometryMode(state, dl);
+        }
+
+        void resetJFG(State *state) {
+            reset(state);
+            state->rsp->DKR.jfg = true;
+            state->rsp->DKR.jfgCullFlip = false;
+        }
+
+        void setupJFG(GBI *gbi) {
+            setup(gbi);
+            gbi->map[F3DDKR_G_MTX] = &matrixJFG;
+            gbi->map[F3DDKR_G_VTX] = &vertexJFG;
+            gbi->map[F3DDKR_G_MOVEWORD] = &moveWordJFG;
+            gbi->map[F3DDKR_G_DMA_OFFSETS] = &dmaOffsetsJFG;
+            gbi->map[F3D_G_SETGEOMETRYMODE] = &setGeometryModeJFG;
+            gbi->map[F3D_G_CLEARGEOMETRYMODE] = &clearGeometryModeJFG;
+            gbi->resetFromTask = &resetJFG;
         }
 
         void setup(GBI *gbi) {

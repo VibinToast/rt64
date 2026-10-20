@@ -188,9 +188,10 @@ namespace RT64 {
         std::array<uint32_t, RSP_MAX_SEGMENTS> segments;
 
         struct {
-            std::array<hlslpp::float4x4, 3> matrices;
-            std::array<uint32_t, 3> segmentedAddresses;
-            std::array<uint32_t, 3> physicalAddresses;
+            // JFG PORT: 8 slots (Jet Force Gemini's revision addresses slots with 3 bits; DKR uses the first 3).
+            std::array<hlslpp::float4x4, 8> matrices;
+            std::array<uint32_t, 8> segmentedAddresses;
+            std::array<uint32_t, 8> physicalAddresses;
             uint32_t matrixOffset;
             uint32_t vertexOffset;
             uint32_t textureOffset;
@@ -201,6 +202,8 @@ namespace RT64 {
             uint8_t vertexCursor;
             bool billboard;
             bool force8MBAddressMask;
+            bool jfg; // JFG PORT: Jet Force Gemini command semantics
+            bool jfgCullFlip = false; // JFG PORT: geometry mode bit 0x1000 swaps which side of a triangle is culled (mirrored reflections)
         } DKR;
 
         struct {
@@ -258,6 +261,7 @@ namespace RT64 {
         void matrix(uint32_t address, uint8_t params);
         void matrixFloat(uint32_t address, uint8_t params);
         void matrixDKR(uint32_t address, uint8_t index);
+        void matrixJFG(uint32_t address, uint8_t param);
         void selectMatrixDKR(uint8_t index);
         void setBillboardDKR(bool enabled);
         void setDMAOffsetsDKR(uint32_t matrixOffset, uint32_t vertexOffset);
@@ -275,7 +279,7 @@ namespace RT64 {
         void specialComputeModelViewProj();
         void setModelViewProjChanged(bool changed);
         void setVertex(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
-        void setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t sourceOffset, bool append);
+        void setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t sourceOffset, bool append, int32_t dstIndexJFG = -1);
         void setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexEXV1(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexColorPD(uint32_t address);
