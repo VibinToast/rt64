@@ -325,6 +325,7 @@ set (SOURCES
 
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3d.cpp"
+    "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3ddkr.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dex.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dex2.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dgolden.cpp"
@@ -559,4 +560,3 @@ build_pixel_shader(  rt64 "src/shaders/Im3DPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/PostProcessPS.hlsl")
 
 target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/src)
-

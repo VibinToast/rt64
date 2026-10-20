@@ -9,6 +9,7 @@
 
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_f3d.h"
+#include "rt64_gbi_f3ddkr.h"
 #include "rt64_gbi_f3dgolden.h"
 #include "rt64_gbi_f3dpd.h"
 #include "rt64_gbi_f3dex.h"
@@ -61,6 +62,9 @@ namespace RT64 {
     const GBIInstance   F3D_GOLDEN                = { "SW Version: 2.0G, 09-30-96 (GE007)",        GBIUCode::F3DGOLDEN,   { false,  false,  false,  false,  false } }; // Needs confirmation.
     const GBIInstance   F3D_PD                    = { "SW Version: Unknown (PD)",                  GBIUCode::F3DPD,       { false,  false,  false,  false,  false } };
     const GBIInstance   F3D_WAVE                  = { "SW Version: 2.0D, 04-01-96 (Wave Race)",    GBIUCode::F3DWAVE,     { false,  false,  false,  false,  false } }; // Needs confirmation.
+    const GBIInstance   F3DDKR_XBUS               = { "F3DDKR.xbus (Diddy Kong Racing)",           GBIUCode::F3DDKR,       { false,  true,   false,  false,  false } };
+    const GBIInstance   F3DDKR_FIFO               = { "F3DDKR.fifo (Diddy Kong Racing)",           GBIUCode::F3DDKR,       { false,  true,   false,  false,  false } };
+    const GBIInstance   F3DDKR_DRAM               = { "F3DDKR.dram (Diddy Kong Racing)",           GBIUCode::F3DDKR,       { false,  true,   false,  false,  false } };
     const GBIInstance   F3DEX_0_95                = { "F3DEX 0.95",                                GBIUCode::F3DEX,       { false,  false,  false,  false,  false } }; // Needs confirmation.
     const GBIInstance   F3DLX_0_95                = { "F3DLX 0.95",                                GBIUCode::F3DEX,       { true,   false,  false,  false,  false } }; // Needs confirmation.
     const GBIInstance   F3DEX_0_96                = { "F3DEX 0.96",                                GBIUCode::F3DEX,       { false,  false,  false,  false,  false } }; // Needs confirmation.
@@ -160,7 +164,10 @@ namespace RT64 {
     // 
     //                  Length      Hash                    Known instances               
     //     
-    static std::array<GBISegment, 94> textSegments = {
+    static std::array<GBISegment, 97> textSegments = {
+            GBISegment{ 0x11F0,     0x2DDDC8AA73AF6BCBULL,  { &F3DDKR_XBUS } },
+            GBISegment{ 0x11F0,     0x58F2DAC4834E2CFDULL,  { &F3DDKR_FIFO } },
+            GBISegment{ 0x1200,     0x31366AF4CC38F062ULL,  { &F3DDKR_DRAM } },
             GBISegment{ 0x1408,     0x9C0926F5E466BE70ULL,  { &F3D_SDK_E } }, // Needs confirmation.
             GBISegment{ 0x1400,     0x34EAA6E921BCF1B2ULL,  { &F3D_SDK_F, &F3D_SDK_UNKNOWN_G, &F3D_SDK_UNKNOWN_H } }, // Needs confirmation.
             GBISegment{ 0x1408,     0x3E05E9BBE814C700ULL,  { &F3D_FIFO_SDK_E } }, // Needs confirmation.
@@ -257,7 +264,10 @@ namespace RT64 {
             GBISegment{ 0x10B0,     0xE8028E4BC6529E6EULL,  { &ZSORTP_0_33 } }, // Needs confirmation.
     };
 
-    static std::array<GBISegment, 105> dataSegments = {
+    static std::array<GBISegment, 108> dataSegments = {
+            GBISegment{ 0x800,      0xC850B914F9B0EAAFULL,  { &F3DDKR_XBUS } },
+            GBISegment{ 0x800,      0x0D773FFCFF980C48ULL,  { &F3DDKR_FIFO } },
+            GBISegment{ 0x800,      0xED3F297CA4A42925ULL,  { &F3DDKR_DRAM } },
             GBISegment{ 0x800,      0xEEB10D73400213B3ULL,  { &F3D_SDK_E } }, // Needs confirmation.
             GBISegment{ 0x800,      0x49651E384B48F694ULL,  { &F3D_SDK_F } }, // Needs confirmation.
             GBISegment{ 0x800,      0x1A736198F90E81C5ULL,  { &F3D_SDK_UNKNOWN_G } }, // Needs confirmation.
@@ -498,6 +508,9 @@ namespace RT64 {
                 break;
             case GBIUCode::L3DEX2:
                 GBI_L3DEX2::setup(&gbi);
+                break;
+            case GBIUCode::F3DDKR:
+                GBI_F3DDKR::setup(&gbi);
                 break;
             default:
                 assert(false && "Unknown UCode.");

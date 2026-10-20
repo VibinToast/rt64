@@ -4,7 +4,9 @@
 
 #include "rt64_rdp.h"
 
+#include <atomic>
 #include <cassert>
+#include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -26,6 +28,23 @@
 #endif
 
 namespace RT64 {
+    namespace {
+        constexpr uint32_t InvalidLoadBoundsLogLimit = 8;
+        std::atomic_uint32_t invalidLoadBoundsLogCount = 0;
+
+        void logInvalidLoadBounds(const char *operation, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrtOrDxt) {
+            const uint32_t logIndex = invalidLoadBoundsLogCount.fetch_add(1, std::memory_order_relaxed);
+            if (logIndex >= InvalidLoadBoundsLogLimit) {
+                return;
+            }
+
+            std::fprintf(stderr,
+                "[RT64] Ignoring %s with invalid bounds (uls=%u, ult=%u, lrs=%u, lrt/dxt=%u)%s\n",
+                operation, unsigned(uls), unsigned(ult), unsigned(lrs), unsigned(lrtOrDxt),
+                (logIndex + 1 == InvalidLoadBoundsLogLimit) ? "; further warnings suppressed" : "");
+        }
+    }
+
     // RDP
     static uint8_t getCommandLength(uint32_t commandId) {
         if (commandId == (G_TEXRECT & 0x3F) || commandId == (G_TEXRECTFLIP & 0x3F)) {
@@ -149,6 +168,13 @@ namespace RT64 {
             // Always tags regions in TMEM, regardless of whether it's possible to make a copy or not.
             uint32_t fbEnd = fb->addressStart + fb->imageRowBytes(fb->width) * fb->maxHeight;
             bool syncRequired = (fb->addressStart < addressEnd) && (fbEnd > addressStart);
+            if (syncRequired && (std::getenv("RT64_DKR_FB_OVERLAP_LOG") != nullptr)) {
+                static std::atomic_uint32_t overlapLogCount = 0;
+                if (overlapLogCount.fetch_add(1, std::memory_order_relaxed) < 256) {
+                    std::fprintf(stderr, "[RT64] TMEM load overlaps tracked FB: fb=[%06X,%06X) w=%u h=%u(max %u) load=[%06X,%06X)\n",
+                        fb->addressStart, fbEnd, fb->width, fb->height, fb->maxHeight, addressStart, addressEnd);
+                }
+            }
             fbManager.insertRegionsTMEM(fb->addressStart, tmemStart, std::min(tmemWords, uint32_t(RDP_TMEM_WORDS)), tmemMask, RGBA32, syncRequired, couldMakeTile ? &regionIterators : nullptr);
             
             if (couldMakeTile) {
@@ -472,6 +498,11 @@ namespace RT64 {
     }
 
     void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
+        if ((loadTile.uls > loadTile.lrs) || (loadTile.ult > loadTile.lrt)) {
+            logInvalidLoadBounds("load tile", loadTile.uls, loadTile.ult, loadTile.lrs, loadTile.lrt);
+            return;
+        }
+
         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
         const uint32_t textureStart = loadTexture.address + bytesOffset + bytesPerRow * (loadTile.ult >> 2);
@@ -511,6 +542,11 @@ namespace RT64 {
     }
 
     void RDP::loadBlockOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
+        if (loadTile.uls > loadTile.lrs) {
+            logInvalidLoadBounds("load block", loadTile.uls, loadTile.ult, loadTile.lrs, loadTile.lrt);
+            return;
+        }
+
         // Deduce loading parameters for block and the texture address.
         const uint32_t bytesOffset = loadTile.uls << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
@@ -547,6 +583,11 @@ namespace RT64 {
     }
 
     void RDP::loadTLUTOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
+        if ((loadTile.uls > loadTile.lrs) || (loadTile.ult > loadTile.lrt)) {
+            logInvalidLoadBounds("load TLUT", loadTile.uls, loadTile.ult, loadTile.lrs, loadTile.lrt);
+            return;
+        }
+
         // Deduce loading parameters for TLUT and the texture address.
         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
@@ -598,14 +639,15 @@ namespace RT64 {
         t.lrt = lrt;
 
         // Ignored by the hardware.
-        if (t.uls > t.lrs) {
+        if ((t.uls > t.lrs) || (t.ult > t.lrt)) {
+            logInvalidLoadBounds("load tile", t.uls, t.ult, t.lrs, t.lrt);
             return;
         }
 
 #   ifdef ASSERT_LOAD_METHODS
         assert((t.uls != t.lrs) || ((t.uls & 0x3) == 0) && "Unknown and possibly undefined hardware behavior.");
         assert((t.ult != t.lrt) || ((t.ult & 0x3) == 0) && "Unknown hardware behavior.");
-        assert((t.lrt <= t.lrt) && "Unknown hardware behavior.");
+        assert((t.ult <= t.lrt) && "Unknown hardware behavior.");
         assert((t.siz == texture.siz) && "Different tile and texture sizes are not currently supported.");
         assert((texture.siz != G_IM_SIZ_4b) && "4-bit texture image is not currently supported.");
         assert((t.fmt != G_IM_FMT_YUV) && "YUV is not currently supported.");
@@ -650,7 +692,7 @@ namespace RT64 {
         assert(tile < RDP_TILES);
 
         // Ignored by the hardware.
-        if (uls > lrs) {
+        if ((uls > lrs) || (ult > lrt)) {
             return false;
         }
 
@@ -688,7 +730,7 @@ namespace RT64 {
         assert(tile < RDP_TILES);
 
         // Ignored by the hardware.
-        if (uls > lrs) {
+        if ((uls > lrs) || (ult > lrt)) {
             return false;
         }
 
@@ -727,7 +769,12 @@ namespace RT64 {
         t.lrt = dxt;
 
         // Ignored by the hardware.
-        if ((t.uls > t.lrs) || (t.lrs >= 0x800)) {
+        if (t.uls > t.lrs) {
+            logInvalidLoadBounds("load block", t.uls, t.ult, t.lrs, t.lrt);
+            return;
+        }
+
+        if (t.lrs >= 0x800) {
             return;
         }
         
@@ -784,6 +831,11 @@ namespace RT64 {
         t.ult = ult;
         t.lrs = lrs;
         t.lrt = lrt;
+
+        if ((t.uls > t.lrs) || (t.ult > t.lrt)) {
+            logInvalidLoadBounds("load TLUT", t.uls, t.ult, t.lrs, t.lrt);
+            return;
+        }
 
 #   ifdef ASSERT_LOAD_METHODS
         assert((texture.siz == G_IM_SIZ_16b) && "Non-16 bit textures are not currently supported.");

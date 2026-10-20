@@ -12,6 +12,9 @@
 #   include "utf8conv/utf8conv.h"
 #elif defined(__linux__)
 #   include <pthread.h>
+#   include <sys/resource.h>
+#   include <sys/syscall.h>
+#   include <unistd.h>
 #endif
 
 namespace RT64 {
@@ -55,11 +58,18 @@ namespace RT64 {
     void Thread::setCurrentThreadPriority(Priority priority) {
 #   if defined(_WIN32)
         SetThreadPriority(GetCurrentThread(), toWindowsPriority(priority));
-#   elif defined(__linux__) || defined(__APPLE__)
-        // On Linux, thread priorities can't be changed under the default scheduler policy (SCHED_OTHER) and the other policies
-        // that are available without root privileges are lower priority. Instead you can set the thread's "nice" value, which ranges
-        // from -20 to 19 (lower being higher priority). However, by strict POSIX spec "nice" is meant to be per-process instead of
-        // per-thread. Therefore to avoid issues in case Linux is modified to match the spec in the future, this function does nothing.
+#   elif defined(__linux__)
+        // Linux implements nice values per thread for NPTL. RT64's shader
+        // workers request Idle priority specifically so they cannot starve the
+        // renderer, but treating that request as a no-op causes severe pipeline
+        // compilation stalls and memory pressure on Steam Deck. Lowering a
+        // thread's own priority is permitted without elevated privileges.
+        if (priority == Thread::Priority::Idle) {
+            const id_t threadId = static_cast<id_t>(syscall(SYS_gettid));
+            (void)setpriority(PRIO_PROCESS, threadId, 19);
+        }
+#   elif defined(__APPLE__)
+        // Keep the platform default on macOS.
         (void)priority;
 #   else
         static_assert(false, "Unimplemented");

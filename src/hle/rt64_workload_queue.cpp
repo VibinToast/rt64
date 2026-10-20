@@ -2,6 +2,11 @@
 // RT64
 //
 
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
 #include "rt64_workload_queue.h"
 
 #include "common/rt64_thread.h"
@@ -51,15 +56,15 @@ namespace RT64 {
         int nextWriteCursor = (writeCursor + 1) % workloads.size();
 
         // Stall the thread until the barrier is lifted if we're trying to write on a workload being used by the GPU.
-        bool waitForBarrier;
-        do {
-            const std::scoped_lock lock(cursorMutex);
-            waitForBarrier = (nextWriteCursor == barrierCursor);
-        } while (waitForBarrier);
-
-        // Modify the cursor and notify anything waiting on the queue.
+        // A condition wait instead of a busy spin: when the queue is full the
+        // spin starves the render thread of cursorMutex and burns a core.
         {
-            const std::scoped_lock lock(cursorMutex);
+            std::unique_lock<std::mutex> lock(cursorMutex);
+            cursorCondition.wait(lock, [&]() {
+                return (nextWriteCursor != barrierCursor) || !threadsRunning;
+            });
+
+            // Modify the cursor and notify anything waiting on the queue.
             writeCursor = nextWriteCursor;
         }
 
@@ -847,7 +852,54 @@ namespace RT64 {
             // Update the GPU profiler with the results from the timestamps of the frame.
             queryPool->queryResults();
             const uint64_t *frameTimestamps = queryPool->getResults();
-            rendererGPUProfiler.log(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
+            const double gpuFrameMs = double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0;
+            rendererGPUProfiler.log(gpuFrameMs);
+            if (std::getenv("RT64_DKR_PERF_LOG") != nullptr) {
+                static uint64_t perfFrameCount = 0;
+                static double perfGpuTotalMs = 0.0;
+                static double perfGpuMaxMs = 0.0;
+                static uint64_t perfFbPairTotal = 0;
+                static uint64_t perfDrawTotal = 0;
+                static auto perfLastLog = std::chrono::steady_clock::now();
+
+                uint32_t totalDraws = 0;
+                for (uint32_t f = 0; f < workload.fbPairCount; f++) {
+                    totalDraws += workload.fbPairs[f].projectionCount > 0 ? workload.fbPairs[f].gameCallCount : 0;
+                }
+
+                perfFrameCount++;
+                perfGpuTotalMs += gpuFrameMs;
+                perfGpuMaxMs = std::max(perfGpuMaxMs, gpuFrameMs);
+                perfFbPairTotal += workload.fbPairCount;
+                perfDrawTotal += totalDraws;
+
+                const auto perfNow = std::chrono::steady_clock::now();
+                if ((perfNow - perfLastLog) >= std::chrono::seconds(1)) {
+                    const double frameCount = static_cast<double>(perfFrameCount);
+                    std::fprintf(stderr,
+                        "[RT64 PERF] frames=%llu gpu_avg=%.2f ms gpu_max=%.2f ms fbPairs_avg=%.1f calls_avg=%.1f\n",
+                        static_cast<unsigned long long>(perfFrameCount), perfGpuTotalMs / frameCount,
+                        perfGpuMaxMs, static_cast<double>(perfFbPairTotal) / frameCount,
+                        static_cast<double>(perfDrawTotal) / frameCount);
+                    perfFrameCount = 0;
+                    perfGpuTotalMs = 0.0;
+                    perfGpuMaxMs = 0.0;
+                    perfFbPairTotal = 0;
+                    perfDrawTotal = 0;
+                    perfLastLog = perfNow;
+                }
+            }
+            if ((gpuFrameMs > 20.0) && (std::getenv("RT64_DKR_FB_OVERLAP_LOG") != nullptr)) {
+                static uint32_t gpuLogCount = 0;
+                if (gpuLogCount++ < 512) {
+                    uint32_t totalDraws = 0;
+                    for (uint32_t f = 0; f < workload.fbPairCount; f++) {
+                        totalDraws += workload.fbPairs[f].projectionCount > 0 ? workload.fbPairs[f].gameCallCount : 0;
+                    }
+                    std::fprintf(stderr, "[RT64] GPU frame %.1f ms, fbPairs=%u, calls=%u\n",
+                        gpuFrameMs, workload.fbPairCount, totalDraws);
+                }
+            }
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
             ext.textureCache->decrementLock();
@@ -865,8 +917,13 @@ namespace RT64 {
     }
 
     void WorkloadQueue::threadAdvanceBarrier() {
-        std::scoped_lock<std::mutex> cursorLock(cursorMutex);
-        barrierCursor = (barrierCursor + 1) % workloads.size();
+        {
+            std::scoped_lock<std::mutex> cursorLock(cursorMutex);
+            barrierCursor = (barrierCursor + 1) % workloads.size();
+        }
+
+        // Wake up advanceToNextWorkload if it's waiting on the barrier.
+        cursorCondition.notify_all();
     }
 
     void WorkloadQueue::threadAdvanceWorkloadId(uint64_t newWorkloadId) {

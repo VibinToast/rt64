@@ -74,7 +74,11 @@ namespace RT64 {
         uploads.clear();
 
         for (uint32_t w : p.curFrame->workloads) {
-            const bool prevFrameValid = (p.prevFrame != nullptr);
+            // The interpolation arrays are only populated when this workload
+            // was matched to one in the previous frame. A previous game frame
+            // can still exist across scene/workload transitions; selecting an
+            // empty interpolation array in that case uploads garbage matrices.
+            const bool prevFrameValid = (p.prevFrame != nullptr) && p.curFrame->frameMap.workloads[w].mapped;
             Workload &workload = p.workloadQueue->workloads[w];
             const DrawData &drawData = workload.drawData;
             DrawBuffers &drawBuffers = workload.drawBuffers;
