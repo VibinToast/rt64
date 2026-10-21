@@ -16,6 +16,16 @@
 // JFG PORT: number of frames handed to the swap chain, read by the "Show FPS" display (src/jfg/jfg_frame_rate.cpp).
 std::atomic<uint32_t> rt64_jfg_present_count{ 0 };
 
+// JFG PORT: the frame being presented, for the render hook (src/jfg/jfg_cpu_layer.cpp draws the game's CPU-drawn reticles
+// on every presented frame). Written by the present thread right before the hook runs, on the same thread.
+struct RT64JfgPresentInfo {
+    uint32_t fbAddress;  // the framebuffer the VI shows (the game frame this present belongs to)
+    float weight;        // how far from the game frame before it to this one: (i + 1) / frames presented, 1 without in-between frames
+    float viewX, viewY, viewWidth, viewHeight; // where the framebuffer lands in the window, in pixels
+    uint32_t fbWidth, fbHeight; // 0 when nothing is shown
+};
+RT64JfgPresentInfo rt64_jfg_present_info{};
+
 namespace RT64 {
     // PresentQueue
 
@@ -354,6 +364,24 @@ namespace RT64 {
                 if (renderParams.texture != nullptr) {
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
                     viRenderer->render(renderParams);
+                }
+
+                // JFG PORT: see rt64_jfg_present_info.
+                rt64_jfg_present_info.fbWidth = 0;
+                if (renderParams.texture != nullptr) {
+                    RenderViewport viewport;
+                    RenderRect scissor;
+                    VIRenderer::getViewportAndScissor(renderParams.swapChain, *renderParams.vi, renderParams.resolutionScale, renderParams.downsamplingScale,
+                        renderParams.removeBlackBorders, viewport, scissor);
+                    const hlslpp::uint2 viFbSize = renderParams.vi->fbSize();
+                    rt64_jfg_present_info.fbAddress = renderParams.vi->fbAddress();
+                    rt64_jfg_present_info.weight = (framesToPresent > 1) ? float(i + 1) / float(framesToPresent) : 1.0f;
+                    rt64_jfg_present_info.viewX = viewport.x;
+                    rt64_jfg_present_info.viewY = viewport.y;
+                    rt64_jfg_present_info.viewWidth = viewport.width;
+                    rt64_jfg_present_info.viewHeight = viewport.height;
+                    rt64_jfg_present_info.fbWidth = uint32_t(viFbSize.x);
+                    rt64_jfg_present_info.fbHeight = uint32_t(viFbSize.y);
                 }
 
                 RenderHookDraw *drawHook = GetRenderHookDraw();
