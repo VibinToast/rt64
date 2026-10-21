@@ -62,7 +62,9 @@ namespace RT64 {
 
             const uintptr_t rdramStart = reinterpret_cast<uintptr_t>(state->RDRAM);
             const uintptr_t commandAddress = reinterpret_cast<uintptr_t>(dl);
-            const uintptr_t rdramEnd = rdramStart + 0x00800000U;
+            // JFG PORT: Jet Force Gemini's lists may also be in mod memory (past 8 MB, up to what the runtime commits).
+            const bool jfg = (state->rsp != nullptr) && state->rsp->DKR.jfg;
+            const uintptr_t rdramEnd = rdramStart + (jfg ? JFGAddressableRDRAM : 0x00800000U);
             if ((commandAddress < rdramStart) || ((commandAddress + sizeof(DisplayList)) > rdramEnd)) {
                 return 0xFFFFFFFFU;
             }

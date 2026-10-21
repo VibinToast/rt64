@@ -409,6 +409,9 @@ namespace RT64 {
             reset(state);
             state->rsp->DKR.jfg = true;
             state->rsp->DKR.jfgCullFlip = false;
+            // JFG PORT: not DKR's 8 MB mask: JFG's addresses go through jfgPhysicalAddress (rt64_state.h), so mods can
+            // draw from their own memory (0x81000000 and up).
+            state->rsp->DKR.force8MBAddressMask = false;
         }
 
         void setupJFG(GBI *gbi) {

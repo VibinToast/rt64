@@ -38,6 +38,20 @@ namespace RT64 {
     
     const uint32_t RDRAMSize = 0x7FFFFF;
 
+    // JFG PORT: the RDRAM a recompiled game and its mods can address: the runtime commits 512 MB (KSEG0's size, librecomp
+    // recomp::mem_size), game memory first, then mod code, data and the mod heap from 0x81000000.
+    const uint32_t JFGAddressableRDRAM = 0x20000000U;
+
+    // JFG PORT: an address from Jet Force Gemini (or one of its mods) to a physical RDRAM offset: the hardware DMA mask
+    // (its low bits keep the alignment the game relies on), widened from 16 MB to the 512 MB the runtime commits. KSEG0 and
+    // KSEG1 pointers (0x80000000 / 0xA0000000 and up) lose their KSEG bits on the way, as on hardware. For the game's
+    // memory this gives the same addresses as DKR's 8 MB mask did; past 8 MB (mod code, data and heap from 0x81000000)
+    // it no longer wraps into the game's memory. No extended mode is needed (RT64's would take KSEG1 pointers as
+    // extended addresses).
+    inline uint32_t jfgPhysicalAddress(uint32_t address, uint32_t mask) {
+        return address & (mask | ((JFGAddressableRDRAM - 1) & ~0x00FFFFFFU));
+    }
+
     struct State {
         struct External {
             Application *app;
