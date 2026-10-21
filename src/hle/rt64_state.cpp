@@ -687,7 +687,7 @@ namespace RT64 {
             auto &colorImg = fbPair.colorImage;
             auto &depthImg = fbPair.depthImage;
             uint32_t colorHeight = fbPair.drawColorRect.bottom(true);
-            if (rsp->DKR.force8MBAddressMask && (colorImg.width == 320)) {
+            if ((rsp->DKR.force8MBAddressMask || rsp->DKR.jfg) && (colorImg.width == 320)) { // JFG PORT: JFG too (its own address handling)
                 // NTSC DKR framebuffers are 320x240. A torn dynamic display
                 // list can briefly supply garbage rectangle bounds; never let
                 // that turn into a framebuffer write over the adjacent game
@@ -1606,7 +1606,7 @@ namespace RT64 {
                     const auto &colorImg = fbPair.colorImage;
                     const auto &depthImg = fbPair.depthImage;
                     colorHeight = fbPair.drawColorRect.bottom(true);
-                    if (rsp->DKR.force8MBAddressMask && (colorImg.width == 320)) {
+                    if ((rsp->DKR.force8MBAddressMask || rsp->DKR.jfg) && (colorImg.width == 320)) { // JFG PORT: JFG too (its own address handling)
                         colorHeight = std::min(colorHeight, 240U);
                     }
                     colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
@@ -1631,7 +1631,7 @@ namespace RT64 {
                         depthRowEnd = fbPair.drawDepthRect.bottom(true);
                     }
 
-                    if (rsp->DKR.force8MBAddressMask && (colorImg.width == 320)) {
+                    if ((rsp->DKR.force8MBAddressMask || rsp->DKR.jfg) && (colorImg.width == 320)) { // JFG PORT: JFG too (its own address handling)
                         colorRowStart = std::min(colorRowStart, 240U);
                         colorRowEnd = std::min(colorRowEnd, 240U);
                         depthRowStart = std::min(depthRowStart, 240U);
@@ -3225,7 +3225,10 @@ namespace RT64 {
     }
 
     uint8_t *State::fromRDRAM(uint32_t rdramAddress) const {
-        if ((rsp != nullptr) && rsp->DKR.force8MBAddressMask) {
+        if ((rsp != nullptr) && rsp->DKR.jfg) {
+            rdramAddress &= (JFGAddressableRDRAM - 1); // JFG PORT: game and mod memory; never past what the runtime commits
+        }
+        else if ((rsp != nullptr) && rsp->DKR.force8MBAddressMask) {
             rdramAddress &= 0x007FFFFFU;
         }
         return &RDRAM[rdramAddress];
