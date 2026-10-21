@@ -1051,7 +1051,12 @@ namespace RT64 {
                 // Detect the color image to interpolate for this workload.
                 RenderTargetKey interpolationTargetKey;
                 int32_t interpolationTargetFbPairIndex = -1;
-                {
+                // JFG PORT: not for an off-screen workload (the character shadow texture). The present thread checks the list of
+                // color images below against the frame it shows to allow in-between frames; the shadow's image replaced the
+                // screen frame's whenever its workload was processed before that frame was presented. Once the timing
+                // settled that way (after the settings menu, then a level change), every screen frame failed the check: no
+                // in-between frames (30 fps on screen), and the frame shown was out of step (jitter, blinking reticles).
+                if (!jfgOffscreen) {
                     std::scoped_lock<std::mutex> managerLock(ext.sharedResources->managerMutex);
                     FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
                     std::vector<uint32_t> &colorVector = ext.sharedResources->colorImageAddressVector;
