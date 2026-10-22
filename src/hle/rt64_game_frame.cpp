@@ -402,6 +402,38 @@ namespace RT64 {
         matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
         matchScenes(orthographicScenes, prevFrame.orthographicScenes);
 
+        // JFG PORT: the character shadows' tiles start the in-between frames at their last game frame's place, so their
+        // image slides with the interpolated character instead of stepping ahead of it (rt64_jfg_shadow_batch).
+        // RT64_INTERP_TRACE=1 counts them, once a second.
+        static uint32_t jfgShadowTiles = 0, jfgShadowSlid = 0, jfgShadowFrames = 0;
+        for (uint32_t w = 0; w < workloads.size(); w++) {
+            GameFrameMap::WorkloadMap &workloadMap = frameMap.workloads[workloads[w]];
+            const Workload &workload = workloadQueue.workloads[workloads[w]];
+            if (!workloadMap.mapped) {
+                continue;
+            }
+            for (const DrawData::JfgShadowTile &shadowTile : workload.drawData.jfgShadowTiles) {
+                if (shadowTile.tileIndex >= workloadMap.tiles.size()) {
+                    continue;
+                }
+                const interop::RDPTile &tile = workload.drawData.rdpTiles[shadowTile.tileIndex];
+                GameFrameMap::TileMap &tileMap = workloadMap.tiles[shadowTile.tileIndex];
+                tileMap.prevUls = tile.uls + shadowTile.dUls;
+                tileMap.prevUlt = tile.ult + shadowTile.dUlt;
+                tileMap.prevLrs = tile.lrs + shadowTile.dUls;
+                tileMap.prevLrt = tile.lrt + shadowTile.dUlt;
+                tileMap.mapped = true;
+                tileInterpolationUsed = tileInterpolationUsed || (shadowTile.dUls != 0.0f) || (shadowTile.dUlt != 0.0f);
+                jfgShadowTiles++;
+                jfgShadowSlid += ((shadowTile.dUls != 0.0f) || (shadowTile.dUlt != 0.0f)) ? 1 : 0;
+            }
+        }
+        static const bool jfgShadowTrace = std::getenv("RT64_INTERP_TRACE") != nullptr;
+        if (jfgShadowTrace && ((++jfgShadowFrames % 60) == 0)) {
+            fprintf(stderr, "[INTERP] shadow tiles %u, slid %u\n", jfgShadowTiles, jfgShadowSlid);
+            jfgShadowTiles = jfgShadowSlid = 0;
+        }
+
         // JFG PORT: debug aid. RT64_INTERP_TRACE=1 prints, once a second, how much of a frame was matched to the one
         // before it (what interpolation can move); the screen-rate counter cannot tell copies from in-between frames.
         static const bool interpTrace = std::getenv("RT64_INTERP_TRACE") != nullptr;

@@ -63,6 +63,7 @@ namespace RT64 {
         drawData.posScreen.clear();
         drawData.rdpTiles.clear();
         drawData.lerpRdpTiles.clear();
+        drawData.jfgShadowTiles.clear(); // JFG PORT
         drawData.gpuTiles.clear();
         drawData.callTiles.clear();
         drawData.rspViewports.clear();
