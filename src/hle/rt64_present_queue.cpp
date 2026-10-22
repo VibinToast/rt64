@@ -23,6 +23,7 @@ struct RT64JfgPresentInfo {
     float weight;        // how far from the game frame before it to this one: (i + 1) / frames presented, 1 without in-between frames
     float viewX, viewY, viewWidth, viewHeight; // where the framebuffer lands in the window, in pixels
     uint32_t fbWidth, fbHeight; // 0 when nothing is shown
+    float frameWeight;   // the weight RT64 rendered this frame with (between the game frame before and this one)
 };
 RT64JfgPresentInfo rt64_jfg_present_info{};
 
@@ -382,6 +383,7 @@ namespace RT64 {
                     rt64_jfg_present_info.viewHeight = viewport.height;
                     rt64_jfg_present_info.fbWidth = uint32_t(viFbSize.x);
                     rt64_jfg_present_info.fbHeight = uint32_t(viFbSize.y);
+                    rt64_jfg_present_info.frameWeight = ((framesToPresent > 1) && (i < 16)) ? frameCounters.jfgWeights[i] : 1.0f;
                 }
 
                 RenderHookDraw *drawHook = GetRenderHookDraw();
