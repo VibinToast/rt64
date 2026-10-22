@@ -1265,6 +1265,12 @@ namespace RT64 {
                         curFrameWeight = 1.0f;
                     }
 
+                    {
+                        // JFG PORT: the weight of the frame the present queue will show at this index (rt64_jfg_present_info).
+                        const uint32_t presentIndex = !generateInterpolatedFrames ? 0 : usingMSAA ? (targetIndex - 1) : (frame > 0) ? targetIndex : 0;
+                        if (presentIndex < 16) curFrameCounters.jfgWeights[presentIndex] = generateInterpolatedFrames ? curFrameWeight : 1.0f;
+                    }
+
                     const bool uploadExtras = (frame == 0) && workloadConfig.raytracingEnabled;
                     if (uploadExtras) {
                         BufferUploader::Upload extrasUpload = { workload.drawData.extraParams.data(), { 0, workload.drawData.extraParams.size() }, sizeof(interop::ExtraParams), RenderBufferFlag::STORAGE, {}, &workload.drawBuffers.extraParamsBuffer };
