@@ -214,6 +214,10 @@ namespace RT64 {
             std::array<bool, 8> jfgHasModel;
             uint32_t jfgObjectId = 0; // the object whose bone buffer G_DMAOFFSETS points into (0 = none)
             uint32_t jfgBoneOffset = 0; // where in that buffer the offset points
+            // JFG PORT: the triangles being drawn are a character shadow's (rt64_jfg_shadow_batch): its tiles slide by
+            // this on in-between frames (uls/ult, quarter texels).
+            bool jfgShadow = false;
+            float jfgShadowUls = 0.0f, jfgShadowUlt = 0.0f;
             hlslpp::float4x4 jfgViewProj;
             hlslpp::float4x4 jfgInvViewProj;
             hlslpp::float4x4 jfgView;

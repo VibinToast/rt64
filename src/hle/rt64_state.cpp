@@ -443,6 +443,9 @@ namespace RT64 {
                     dstRDPTile.shiftt = ShiftScaleMap[tile.shiftt];
                     dstRDPTile.uls = float(tile.uls);
                     dstRDPTile.ult = float(tile.ult);
+                    if (rsp->DKR.jfg && rsp->DKR.jfgShadow) { // JFG PORT: see rt64_jfg_shadow_batch
+                        drawData.jfgShadowTiles.push_back({ callTileIndex, rsp->DKR.jfgShadowUls, rsp->DKR.jfgShadowUlt });
+                    }
                     dstRDPTile.cms = tile.cms | ((tile.masks == 0) ? G_TX_CLAMP : 0);
                     dstRDPTile.cmt = tile.cmt | ((tile.maskt == 0) ? G_TX_CLAMP : 0);
 
