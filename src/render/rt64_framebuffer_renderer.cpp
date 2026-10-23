@@ -111,6 +111,24 @@ namespace {
     std::unordered_map<uint64_t, std::array<float, 3>> jfgEmissionColours;
 }
 
+// JFG PORT: which material maps each texture has (bit 0 normal, 1 specular, 2 emission), as last scanned, and a request
+// to scan again (the lighting tool's Rescan button: new or changed files in materials/).
+namespace {
+    std::mutex jfgMaterialKindsMutex;
+    std::unordered_map<uint64_t, uint32_t> jfgMaterialKinds;
+    std::atomic<bool> jfgMaterialRescan{ false };
+}
+
+uint32_t rt64_jfg_material_kinds(uint64_t hash) {
+    std::lock_guard<std::mutex> lock(jfgMaterialKindsMutex);
+    const auto it = jfgMaterialKinds.find(hash);
+    return (it != jfgMaterialKinds.end()) ? it->second : 0;
+}
+
+void rt64_jfg_material_rescan() {
+    jfgMaterialRescan.store(true);
+}
+
 bool rt64_jfg_emission_colour(uint64_t hash, float *rgb) {
     std::lock_guard<std::mutex> lock(jfgEmissionMutex);
     const auto it = jfgEmissionColours.find(hash);
@@ -2763,7 +2781,8 @@ namespace RT64 {
         }
 
         std::lock_guard<std::mutex> lock(jfgMaterialMutex);
-        if (jfgMaterialsScanned && (current == jfgMaterialPacks)) {
+        const bool rescan = jfgMaterialRescan.exchange(false);
+        if (jfgMaterialsScanned && (current == jfgMaterialPacks) && !rescan) {
             return;
         }
 
@@ -2795,6 +2814,19 @@ namespace RT64 {
         }
 
         rt64_jfg_material_files = int(jfgMaterialFiles.size());
+        {
+            std::lock_guard<std::mutex> kindsLock(jfgMaterialKindsMutex);
+            jfgMaterialKinds.clear();
+            for (const auto &it : jfgMaterialFiles) {
+                uint32_t kinds = 0;
+                for (int k = 0; k < 3; k++) {
+                    kinds |= it.second.path[k].empty() ? 0U : (1U << k);
+                }
+
+                jfgMaterialKinds[it.first] = kinds;
+            }
+        }
+
         if (!jfgMaterialFiles.empty()) {
             fprintf(stderr, "[RT64 JFG] %zu textures have material maps (%s and %zu texture packs)\n", jfgMaterialFiles.size(), folder.string().c_str(), packs.size());
         }

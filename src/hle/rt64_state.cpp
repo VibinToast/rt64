@@ -86,6 +86,61 @@ uint32_t rt64_jfg_glow_hashes(uint32_t start, uint32_t end, uint64_t *hashes, ui
     return count;
 }
 
+// JFG PORT: the texture under the middle of the view (the lighting tool's Glow tab, while rt64_jfg_pick is on): the
+// nearest triangle of a perspective draw that crosses the view's centre, from the positions the RSP worked out on the
+// CPU (posTransformed), with its first tile's hash, size and the address it was loaded from. A frame can take several
+// workloads, so the nearest is gathered while drawing goes into one framebuffer and is reported once drawing moves on
+// to another one (the next frame's).
+namespace {
+    struct JfgPick {
+        bool any = false;
+        float depth = 0.0f;
+        uint64_t hash = 0;
+        uint32_t width = 0, height = 0, address = 0;
+    };
+
+    std::atomic<bool> jfgPickOn{ false };
+    std::mutex jfgPickMutex;
+    uint32_t jfgPickFb = UINT32_MAX;
+    JfgPick jfgPickGathering, jfgPickDone;
+
+    void jfgPickConsider(uint32_t fbAddress, const JfgPick &hit) {
+        std::lock_guard<std::mutex> lock(jfgPickMutex);
+        if (fbAddress != jfgPickFb) {
+            if (jfgPickFb != UINT32_MAX) {
+                jfgPickDone = jfgPickGathering;
+                if (getenv("RT64_JFG_PICK_LOG") != nullptr) {
+                    fprintf(stderr, "[RT64 JFG] pick fb %08X: %016llX depth %.5f\n", jfgPickFb, (unsigned long long)jfgPickDone.hash, jfgPickDone.depth);
+                }
+            }
+
+            jfgPickGathering = {};
+            jfgPickFb = fbAddress;
+        }
+
+        if (!jfgPickGathering.any || (hit.depth < jfgPickGathering.depth)) {
+            jfgPickGathering = hit;
+        }
+    }
+}
+
+void rt64_jfg_pick(bool on) {
+    jfgPickOn.store(on, std::memory_order_relaxed);
+}
+
+bool rt64_jfg_picked(uint64_t *hash, uint32_t *width, uint32_t *height, uint32_t *address) {
+    std::lock_guard<std::mutex> lock(jfgPickMutex);
+    if (!jfgPickDone.any) {
+        return false;
+    }
+
+    *hash = jfgPickDone.hash;
+    *width = jfgPickDone.width;
+    *height = jfgPickDone.height;
+    *address = jfgPickDone.address;
+    return true;
+}
+
 // A texture's glow (0-255) by its hash.
 uint32_t rt64_jfg_glow_for(uint64_t hash) {
     if (!jfgGlowAny.load(std::memory_order_relaxed)) {
@@ -1433,6 +1488,61 @@ namespace RT64 {
                         }
 
                         rdpTileCursor++;
+                    }
+                }
+
+                // JFG PORT: the texture under the middle of the view (rt64_jfg_pick): this draw's nearest triangle
+                // across the centre, in clip space (the centre is x = y = 0).
+                if (jfgPickOn.load(std::memory_order_relaxed) && (proj.type == Projection::Type::Perspective) && (gameCall.callDesc.tileCount > 0)) {
+                    const DrawCallTile &pickTile = workload.drawData.callTiles[gameCall.callDesc.tileIndex];
+                    if (pickTile.valid && !pickTile.tileCopyUsed && (pickTile.tmemHashOrID != 0)) {
+                        const std::vector<uint32_t> &faces = workload.drawData.faceIndices;
+                        const auto &clip = workload.drawData.posTransformed;
+                        for (uint32_t t = 0; t < gameCall.callDesc.triangleCount; t++) {
+                            const size_t f = size_t(gameCall.meshDesc.faceIndicesStart) + t * 3;
+                            if ((f + 2) >= faces.size()) {
+                                break;
+                            }
+
+                            float x[3], y[3], z[3];
+                            bool inFront = true;
+                            for (uint32_t i = 0; (i < 3) && inFront; i++) {
+                                const uint32_t v = faces[f + i];
+                                if (v >= clip.size()) {
+                                    inFront = false;
+                                    break;
+                                }
+
+                                const float w = float(clip[v].w);
+                                inFront = (w > 1e-4f);
+                                x[i] = float(clip[v].x) / w;
+                                y[i] = float(clip[v].y) / w;
+                                z[i] = float(clip[v].z) / w;
+                            }
+
+                            const float det = (y[1] - y[2]) * (x[0] - x[2]) + (x[2] - x[1]) * (y[0] - y[2]);
+                            if (!inFront || (fabsf(det) < 1e-12f)) {
+                                continue;
+                            }
+
+                            const float a = ((y[1] - y[2]) * -x[2] + (x[2] - x[1]) * -y[2]) / det;
+                            const float b = ((y[2] - y[0]) * -x[2] + (x[0] - x[2]) * -y[2]) / det;
+                            const float c = 1.0f - a - b;
+                            const float depth = a * z[0] + b * z[1] + c * z[2];
+                            if ((a < 0.0f) || (b < 0.0f) || (c < 0.0f) || (depth < -1.0f) || (depth > 1.0f)) {
+                                continue;
+                            }
+
+                            JfgPick hit;
+                            hit.any = true;
+                            hit.depth = depth;
+                            hit.hash = pickTile.tmemHashOrID;
+                            hit.width = pickTile.sampleWidth;
+                            hit.height = pickTile.sampleHeight;
+                            hit.address = rdp->rice.lastLoadOpByTMEM[pickTile.loadTile.tmem].texture.address;
+                            jfgPickConsider(fbPair.colorImage.address, hit);
+                            break;
+                        }
                     }
                 }
             }
