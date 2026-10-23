@@ -75,6 +75,8 @@ std::atomic<uint32_t> rt64_jfg_fog_color{ 0xA0B4C8u }; // 0xRRGGBB
 std::atomic<int> rt64_jfg_vignette{ 0 };       // vignette (VignettePS.hlsl)
 std::atomic<int> rt64_jfg_pixel_lights{ 0 };   // the game's lights on the level per pixel (RasterPS, src/jfg/jfg_lighting.cpp)
 std::atomic<int> rt64_jfg_debug_world{ 0 };    // show the world position as colour (RasterPS; F9 Lighting tab, RT64_JFG_DEBUG_WORLD)
+std::atomic<int> rt64_jfg_debug_normal{ 0 };   // show the surface direction as colour (RasterPS; F9 Lighting tab)
+std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting depends on facing the light, 0-1 (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
 std::atomic<float> rt64_jfg_vignette_size{ 0.45f };
 
@@ -511,6 +513,8 @@ namespace RT64 {
         RenderRect previousScissor;
         interop::RasterParams rasterParams = {};
         const bool jfgDebugWorld = rt64_jfg_debug_world.load(std::memory_order_relaxed) != 0; // JFG PORT: see RasterPS
+        const bool jfgDebugNormal = rt64_jfg_debug_normal.load(std::memory_order_relaxed) != 0;
+        const float jfgFacing = rt64_jfg_facing.load(std::memory_order_relaxed);
         const bool jfgPixelLights = (rt64_jfg_pixel_lights.load(std::memory_order_relaxed) != 0) && (jfgLightCount > 0);
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
@@ -1106,8 +1110,10 @@ namespace RT64 {
                 rasterParams.screenScale = triangles.screenScale;
                 rasterParams.screenOffset = triangles.screenOffset;
                 rasterParams.padding.x = ((drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ? RASTER_JFG_INDEXED : 0) |
-                    (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | ((jfgPixelLights && triangles.jfgLevel) ? RASTER_JFG_LEVEL : 0); // JFG PORT: see RasterVS, RasterPS
+                    (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | ((jfgPixelLights && triangles.jfgLevel) ? RASTER_JFG_LEVEL : 0) |
+                    (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0); // JFG PORT: see RasterVS, RasterPS
                 rasterParams.padding.y = jfgLightCount;
+                memcpy(&rasterParams.padding.z, &jfgFacing, sizeof(float));
                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
 
                 drawCallTriangles(drawCall);

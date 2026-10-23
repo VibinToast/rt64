@@ -13,6 +13,8 @@
 #define RASTER_JFG_INDEXED      0x1
 #define RASTER_JFG_DEBUG_WORLD  0x2
 #define RASTER_JFG_LEVEL        0x4 // the level's own geometry: light it per pixel with padding.y of the frame's lights
+#define RASTER_JFG_DEBUG_NORMAL 0x8 // show the surface direction as colour
+// padding.z (float bits): how much the level lighting depends on which way a surface faces its light (0-1).
 
 #ifdef HLSL_CPU
 namespace interop {

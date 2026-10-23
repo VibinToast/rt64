@@ -61,6 +61,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     
     const uint instanceIndex = instanceRenderIndices[gConstants.renderIndex].instanceIndex;
     const float4 vertexColor = renderFlagSmoothShade(rp.flags) ? vertexSmoothColor : float4(vertexFlatColor.rgb, vertexSmoothColor.a);
+
+    // JFG PORT: the surface's direction from how the world position changes across the screen: one direction per
+    // triangle (the level has no normals). Worked out here, outside any branch, as screen-space derivatives need.
+    // ddy x ddx points towards the camera for every visible surface.
+    const float3 jfgNormal = normalize(cross(ddy(vertexWorldPos.xyz), ddx(vertexWorldPos.xyz)));
     const ColorCombiner colorCombiner = { rp.ccL, rp.ccH };
     const bool depthClampNear = renderFlagNoN(rp.flags);
     const bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
@@ -172,15 +177,19 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // JFG PORT: the game's dynamic lights on the level, per pixel. The game adds them to the level's vertex colours on
     // the CPU (trackLightAsm, skipped while this is on), so they go into the shade colour here, before the combiner
     // multiplies it with the texture: full strength within the inner radius, linear to nothing at the radius.
+    // Facing (padding.z): how much a surface turned away from a light gets less of it, which the game never does.
     if ((gConstants.padding.x & RASTER_JFG_LEVEL) && (vertexWorldPos.w > 0.5f)) {
+        const float facing = saturate(asfloat(gConstants.padding.z));
         float3 added = float3(0.0f, 0.0f, 0.0f);
         for (uint i = 0; i < gConstants.padding.y; i++) {
             const JfgLight light = jfgLights[i];
             const float radius = light.posRadius.w;
-            const float d = distance(vertexWorldPos.xyz, light.posRadius.xyz);
+            const float3 toLight = light.posRadius.xyz - vertexWorldPos.xyz;
+            const float d = length(toLight);
             if (d < radius) {
                 const float inner = min(light.colorInner.w, radius - 1.0f);
-                added += light.colorInner.rgb * saturate((radius - d) / (radius - inner));
+                const float towards = saturate(dot(jfgNormal, toLight / max(d, 0.001f)));
+                added += light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * lerp(1.0f, towards, facing);
             }
         }
 
@@ -293,6 +302,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // has none (raw triangles, rectangles).
     if (gConstants.padding.x & RASTER_JFG_DEBUG_WORLD) {
         resultColor.rgb = (vertexWorldPos.w > 0.5f) ? frac(vertexWorldPos.xyz / 256.0f) : float3(1.0f, 0.0f, 1.0f);
+    }
+
+    // JFG PORT: the surface direction as colour (x red, y green, z blue; up is green), magenta without a position.
+    if (gConstants.padding.x & RASTER_JFG_DEBUG_NORMAL) {
+        resultColor.rgb = (vertexWorldPos.w > 0.5f) ? (jfgNormal * 0.5f + 0.5f) : float3(1.0f, 0.0f, 1.0f);
     }
     
     return true;
