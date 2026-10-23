@@ -27,6 +27,7 @@ namespace RT64 {
         spriteCommands.clear();
         pointLights.clear();
         jfgCasters.clear(); // JFG PORT
+        jfgObjects.clear();
         fbChangePool.reset();
         fbStorage.reset();
         physicalAddressTransformMap.clear();
@@ -55,6 +56,7 @@ namespace RT64 {
         drawData.lightIndices.clear();
         drawData.lightCounts.clear();
         drawData.lookAtIndices.clear();
+        drawData.jfgNormals.clear(); // JFG PORT
         drawData.faceIndices.clear();
         drawData.modifyPosUints.clear();
         drawData.rdpParams.clear();
@@ -131,6 +133,7 @@ namespace RT64 {
         r.lightIndices = { 0, 0 };
         r.lightCounts = { 0, 0 };
         r.lookAtIndices = { 0, 0 };
+        r.jfgNormals = { 0, 0 }; // JFG PORT
         r.faceIndices = { 0, 0 };
         r.modifyPosUints = { 0, 0 };
         r.rdpParams = { 0, 0 };
@@ -176,6 +179,7 @@ namespace RT64 {
         r.lightIndices.second = drawData.lightIndices.size();
         r.lightCounts.second = drawData.lightCounts.size();
         r.lookAtIndices.second = drawData.lookAtIndices.size();
+        r.jfgNormals.second = drawData.jfgNormals.size(); // JFG PORT
         r.faceIndices.second = drawData.faceIndices.size();
         r.modifyPosUints.second = drawData.modifyPosUints.size();
         r.rdpParams.second = drawData.rdpParams.size();
@@ -210,6 +214,7 @@ namespace RT64 {
             { drawData.lightIndices.data(), drawRanges.lightIndices, sizeof(uint16_t), RenderBufferFlag::FORMATTED | RenderBufferFlag::STORAGE, { RenderFormat::R16_UINT }, &drawBuffers.lightIndicesBuffer },
             { drawData.lightCounts.data(), drawRanges.lightCounts, sizeof(uint8_t), RenderBufferFlag::FORMATTED | RenderBufferFlag::STORAGE, { RenderFormat::R8_UINT }, &drawBuffers.lightCountsBuffer },
             { drawData.lookAtIndices.data(), drawRanges.lookAtIndices, sizeof(uint16_t), RenderBufferFlag::FORMATTED | RenderBufferFlag::STORAGE, { RenderFormat::R16_UINT }, &drawBuffers.lookAtIndicesBuffer },
+            { drawData.jfgNormals.data(), drawRanges.jfgNormals, sizeof(uint32_t), RenderBufferFlag::FORMATTED | RenderBufferFlag::STORAGE, { RenderFormat::R32_UINT }, &drawBuffers.jfgNormalsBuffer }, // JFG PORT
             { drawData.faceIndices.data(), drawRanges.faceIndices, sizeof(uint32_t), RenderBufferFlag::INDEX | RenderBufferFlag::STORAGE | rtInputFlag, { }, &drawBuffers.faceIndicesBuffer },
             { drawData.modifyPosUints.data(), drawRanges.modifyPosUints, sizeof(uint32_t), RenderBufferFlag::FORMATTED, { RenderFormat::R32_UINT }, &drawBuffers.modifyPosUintsBuffer },
             { drawData.rdpParams.data(), drawRanges.rdpParams, sizeof(interop::RDPParams), RenderBufferFlag::STORAGE, { }, &drawBuffers.rdpParamsBuffer },
@@ -247,6 +252,7 @@ namespace RT64 {
         updateOutputBuffer(worker, outputBuffers.shadedColBuffer, vertexCount * sizeof(float) * 4, RenderBufferFlag::VERTEX);
         updateOutputBuffer(worker, outputBuffers.worldPosBuffer, vertexCount * sizeof(float) * 4, rtInputFlag);
         updateOutputBuffer(worker, outputBuffers.jfgWorldPosBuffer, vertexCount * sizeof(float) * 4); // JFG PORT
+        updateOutputBuffer(worker, outputBuffers.jfgWorldNormBuffer, vertexCount * sizeof(float) * 4);
         updateOutputBuffer(worker, outputBuffers.worldNormBuffer, vertexCount * sizeof(float) * 4);
         updateOutputBuffer(worker, outputBuffers.worldVelBuffer, vertexCount * sizeof(float) * 4);
         updateOutputBuffer(worker, outputBuffers.testZIndexBuffer, extended.testZIndexCount * sizeof(uint32_t), RenderBufferFlag::INDEX | RenderBufferFlag::STORAGE);
@@ -269,6 +275,7 @@ namespace RT64 {
         nextDrawDataRange(r.lightIndices);
         nextDrawDataRange(r.lightCounts);
         nextDrawDataRange(r.lookAtIndices);
+        nextDrawDataRange(r.jfgNormals); // JFG PORT
         nextDrawDataRange(r.faceIndices);
         nextDrawDataRange(r.modifyPosUints);
         nextDrawDataRange(r.rdpParams);

@@ -16,6 +16,15 @@ namespace interop {
         float4 posRadius;   // xyz = position, w = radius
         float4 colorInner;  // rgb = colour, w = inner radius
     };
+
+    // JFG PORT: how the game lights one character or object this frame (its ObjectLighting, read by the port at
+    // lightObject): brightness = ambient + the sum over its directions of range x how much the surface faces them, as
+    // the game's lightSingleLight / lightTwoLights / lightMultiLight do per vertex, here per pixel with the model's
+    // normals. 0-1 units (the game's 0-255 / 255).
+    struct JfgObjectLight {
+        float4 dirs[4];     // xyz = direction towards the light (world), w = range (max - min)
+        float4 params;      // x = ambient (min), y = directions used, z = how much the frame's lights add (0-1)
+    };
 #ifdef HLSL_CPU
 };
 #endif

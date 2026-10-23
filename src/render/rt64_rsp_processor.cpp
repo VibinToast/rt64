@@ -48,6 +48,8 @@ namespace RT64 {
         processSet->setBuffer(processSet->dstTc, p.outputBuffers->genTexCoordBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 2));
         processSet->setBuffer(processSet->dstCol, p.outputBuffers->shadedColBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
         processSet->setBuffer(processSet->dstWorldPos, p.outputBuffers->jfgWorldPosBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4)); // JFG PORT
+        processSet->setBuffer(processSet->srcJfgNormals, p.drawBuffers->jfgNormalsBuffer.get(), p.drawBuffers->jfgNormalsBuffer.getView(0));
+        processSet->setBuffer(processSet->dstWorldNorm, p.outputBuffers->jfgWorldNormBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
 
         const uint32_t modifyCount = drawData.modifyCount();
         modifyCB.modifyCount = modifyCount;
@@ -63,14 +65,16 @@ namespace RT64 {
                 RenderBufferBarrier(outputBuffers->screenPosBuffer.buffer.get(), RenderBufferAccess::WRITE),
                 RenderBufferBarrier(outputBuffers->genTexCoordBuffer.buffer.get(), RenderBufferAccess::WRITE),
                 RenderBufferBarrier(outputBuffers->shadedColBuffer.buffer.get(), RenderBufferAccess::WRITE),
-                RenderBufferBarrier(outputBuffers->jfgWorldPosBuffer.buffer.get(), RenderBufferAccess::WRITE) // JFG PORT
+                RenderBufferBarrier(outputBuffers->jfgWorldPosBuffer.buffer.get(), RenderBufferAccess::WRITE), // JFG PORT
+                RenderBufferBarrier(outputBuffers->jfgWorldNormBuffer.buffer.get(), RenderBufferAccess::WRITE)
             };
 
             RenderBufferBarrier afterBarriers[] = {
                 RenderBufferBarrier(outputBuffers->screenPosBuffer.buffer.get(), RenderBufferAccess::READ),
                 RenderBufferBarrier(outputBuffers->genTexCoordBuffer.buffer.get(), RenderBufferAccess::READ),
                 RenderBufferBarrier(outputBuffers->shadedColBuffer.buffer.get(), RenderBufferAccess::READ),
-                RenderBufferBarrier(outputBuffers->jfgWorldPosBuffer.buffer.get(), RenderBufferAccess::READ) // JFG PORT
+                RenderBufferBarrier(outputBuffers->jfgWorldPosBuffer.buffer.get(), RenderBufferAccess::READ), // JFG PORT
+                RenderBufferBarrier(outputBuffers->jfgWorldNormBuffer.buffer.get(), RenderBufferAccess::READ)
             };
 
             const int dispatchCount = (processCB.vertexCount + ThreadGroupSize - 1) / ThreadGroupSize;

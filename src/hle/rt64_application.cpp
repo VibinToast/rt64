@@ -507,6 +507,7 @@ namespace RT64 {
 #       endif
 
             state->jfgDlStart = dlStartAddress; // JFG PORT: see rt64_jfg_frame_lights
+            state->jfgLoadObjects(dlStartAddress);
             if (isHLE) {
                 interpreter->processDisplayLists(dlStartAddress, dlStart);
             }

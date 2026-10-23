@@ -41,6 +41,8 @@ RWStructuredBuffer<float4> dstPos : register(u19);
 RWStructuredBuffer<float2> dstTc : register(u20);
 RWStructuredBuffer<float4> dstCol : register(u21);
 RWStructuredBuffer<float4> dstWorldPos : register(u22); // JFG PORT: the world position, for the raster shaders (RasterVS)
+Buffer<uint> srcJfgNormals : register(t23);            // JFG PORT: a character's normal (s8 x, y, z) and slot + 1
+RWStructuredBuffer<float4> dstWorldNorm : register(u24); // ... turned into the world: xyz, w = slot + 1 (0 = none)
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSMain(uint vertexIndex : SV_DispatchThreadID) {
@@ -67,6 +69,17 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     const float4 framePos = float4(pos - vel * (1.0f - gConstants.curFrameWeight), 1.0f);
     float4 tfPos = mul(mul(viewProjMat, worldMat), framePos);
     dstWorldPos[vertexOffsetIndex] = float4(mul(worldMat, framePos).xyz, 1.0f); // JFG PORT
+
+    // JFG PORT: a character's normal is in its joint's space, as its position: the joint's matrix turns it.
+    const uint jfgPacked = srcJfgNormals[vertexOffsetIndex];
+    float4 jfgNorm = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if ((jfgPacked >> 24) != 0) {
+        const float3 n = float3(float(int(jfgPacked << 24) >> 24), float(int(jfgPacked << 16) >> 24), float(int(jfgPacked << 8) >> 24));
+        const float3 worldN = mul(worldMat, float4(n, 0.0f)).xyz;
+        jfgNorm = float4(normalize(worldN + float3(0.0f, 1e-6f, 0.0f)), float(jfgPacked >> 24));
+    }
+
+    dstWorldNorm[vertexOffsetIndex] = jfgNorm;
 
     // Fog.
     const uint fogIndex = srcFogIndices[vertexOffsetIndex];

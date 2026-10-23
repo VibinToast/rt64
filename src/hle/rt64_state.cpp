@@ -50,6 +50,8 @@ namespace {
         uint32_t dlStart = 0;
         std::vector<interop::PointLight> lights;
         std::vector<interop::PointLight> casters; // shadow casters: position, pointRadius = radius, direction = move
+        std::vector<uint32_t> objectRanges, objectNormals; // see State::jfgObjectRanges
+        std::vector<interop::JfgObjectLight> objectLights;
     };
 
     // How far each light or caster moved since the frame before, by its id (in its direction field); a jump further
@@ -88,7 +90,26 @@ static JfgLightFrame &jfgLightFrameFor(uint32_t dlStart) {
     frame.dlStart = dlStart;
     frame.lights.clear();
     frame.casters.clear();
+    frame.objectRanges.clear();
+    frame.objectNormals.clear();
+    frame.objectLights.clear();
     return frame;
+}
+
+// JFG PORT: the frame's lit characters and objects (src/jfg/jfg_lighting.cpp, from lightObject): their vertex arrays
+// (physical start, vertex count, offset into normals), each vertex's normal and slot (DrawData::jfgNormals), and how
+// the game lights each slot (20 floats: 4 x direction + range, then ambient, directions used, light share, 0).
+void rt64_jfg_frame_objects(uint32_t dlStart, const uint32_t *ranges, uint32_t rangeCount, const uint32_t *normals,
+    uint32_t normalCount, const float *lights, uint32_t lightCount)
+{
+    std::lock_guard<std::mutex> lock(jfgLightMutex);
+    JfgLightFrame &frame = jfgLightFrameFor(dlStart);
+    frame.objectRanges.assign(ranges, ranges + rangeCount * 3);
+    frame.objectNormals.assign(normals, normals + normalCount);
+    frame.objectLights.resize(lightCount);
+    if (lightCount > 0) {
+        memcpy(frame.objectLights.data(), lights, sizeof(interop::JfgObjectLight) * lightCount);
+    }
 }
 
 void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) {
@@ -151,6 +172,21 @@ static bool jfgTakeFrameLights(uint32_t dlStart, std::vector<interop::PointLight
 }
 
 namespace RT64 {
+    void State::jfgLoadObjects(uint32_t dlStart) { // JFG PORT: see rt64_jfg_frame_objects
+        std::lock_guard<std::mutex> lock(jfgLightMutex);
+        jfgObjectRanges.clear();
+        jfgObjectNormalData.clear();
+        jfgObjectLights.clear();
+        for (const JfgLightFrame &f : jfgLightFrames) {
+            if (f.dlStart == dlStart) {
+                jfgObjectRanges = f.objectRanges;
+                jfgObjectNormalData = f.objectNormals;
+                jfgObjectLights = f.objectLights;
+                break;
+            }
+        }
+    }
+
     const float ShiftScaleMap[] = {
         1.0f,
         1.0f / 2.0f,
@@ -1904,7 +1940,7 @@ namespace RT64 {
                 }
 
                 // Record all setup previous to drawing any of the recorded framebuffers.
-                framebufferRenderer->setJfgLights(workload.pointLights, workload.jfgCasters, 1.0f); // JFG PORT
+                framebufferRenderer->setJfgLights(workload.pointLights, workload.jfgCasters, workload.jfgObjects, 1.0f); // JFG PORT
                 framebufferRenderer->endFramebuffers(ext.framebufferGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, false);
                 framebufferRenderer->recordSetup(ext.framebufferGraphicsWorker, bufferUploaders, queuedProcessor, nullptr, &workload.outputBuffers, false);
 
@@ -2163,6 +2199,23 @@ namespace RT64 {
         }
 
         // JFG PORT: the game's lights for this frame (see rt64_jfg_frame_lights).
+        workload.jfgObjects = jfgObjectLights; // JFG PORT: loaded when the display list started (jfgLoadObjects)
+        {
+            static const bool log = std::getenv("RT64_JFG_DEBUG_LIGHTS") != nullptr;
+            static uint32_t frames = 0, logged = 0;
+            if (log && !jfgObjectLights.empty() && (logged < 100) && ((frames++ % 60) == 0)) {
+                logged++;
+                fprintf(stderr, "[rt64] dl %08X objects %zu ranges %zu normals %zu; vertex loads %u found %u", jfgDlStart, jfgObjectLights.size(),
+                    jfgObjectRanges.size() / 3, jfgObjectNormalData.size(), jfgObjectLoads, jfgObjectHits);
+                for (size_t i = 0; (i + 2) < jfgObjectRanges.size() && i < 12; i += 3) {
+                    fprintf(stderr, " | %08X x%u", jfgObjectRanges[i], jfgObjectRanges[i + 1]);
+                }
+
+                fprintf(stderr, "\n");
+            }
+
+            jfgObjectLoads = jfgObjectHits = 0;
+        }
         if (jfgTakeFrameLights(jfgDlStart, workload.pointLights, workload.jfgCasters)) {
             static const bool log = std::getenv("RT64_JFG_DEBUG_LIGHTS") != nullptr;
             static uint32_t frames = 0, logged = 0;

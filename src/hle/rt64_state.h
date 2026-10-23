@@ -119,6 +119,25 @@ namespace RT64 {
         bool dumpingTexturesSkipDynamic = true; // JFG PORT: stop dumping sources that change on most frames (dynamic_sources.txt)
         std::string traceScene = "unknown"; // JFG PORT: the level or screen on screen, set by the host before each display list; stamped on every draw_trace.txt line
         uint32_t jfgDlStart = 0; // JFG PORT: the display list being processed (Application::processDisplayLists), for rt64_jfg_frame_lights
+        // JFG PORT: the lit characters and objects of the display list being processed (rt64_jfg_frame_objects):
+        // vertex array ranges (start, vertex count, offset into jfgObjectNormalData), their normals, their lighting.
+        std::vector<uint32_t> jfgObjectRanges;
+        std::vector<uint32_t> jfgObjectNormalData;
+        std::vector<interop::JfgObjectLight> jfgObjectLights;
+        void jfgLoadObjects(uint32_t dlStart);
+        uint32_t jfgObjectHits = 0, jfgObjectLoads = 0; // vertex loads that found a character's normal, all DKR loads
+        uint32_t jfgObjectNormal(uint32_t address) {
+            jfgObjectLoads++;
+            for (size_t i = 0; (i + 2) < jfgObjectRanges.size(); i += 3) {
+                const uint32_t start = jfgObjectRanges[i];
+                if ((address >= start) && (address < (start + jfgObjectRanges[i + 1] * 10))) {
+                    jfgObjectHits++;
+                    return jfgObjectNormalData[jfgObjectRanges[i + 2] + (address - start) / 10];
+                }
+            }
+
+            return 0;
+        }
         bool configurationSaveQueued = false;
         uint64_t workloadId = 0;
         uint64_t presentId = 0;

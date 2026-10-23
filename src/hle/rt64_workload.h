@@ -17,6 +17,8 @@
 #include "rt64_command_warning.h"
 #include "rt64_draw_call.h"
 #include "rt64_framebuffer_changes.h"
+#include "shared/rt64_jfg_light.h"
+
 #include "rt64_framebuffer_manager.h"
 #include "rt64_framebuffer_pair.h"
 #include "rt64_framebuffer_storage.h"
@@ -35,6 +37,7 @@ namespace RT64 {
         std::vector<uint16_t> lightIndices;
         std::vector<uint8_t> lightCounts;
         std::vector<uint16_t> lookAtIndices;
+        std::vector<uint32_t> jfgNormals; // JFG PORT: per vertex, a character's normal (s8 x, y, z) and object slot + 1 (top byte), or 0
         std::vector<uint32_t> faceIndices;
         std::vector<uint32_t> modifyPosUints;
         std::vector<hlslpp::float4> posTransformed;
@@ -119,6 +122,7 @@ namespace RT64 {
         Range lightIndices;
         Range lightCounts;
         Range lookAtIndices;
+        Range jfgNormals; // JFG PORT
         Range faceIndices;
         Range modifyPosUints;
         Range rdpParams;
@@ -151,6 +155,7 @@ namespace RT64 {
         BufferPair lightIndicesBuffer;
         BufferPair lightCountsBuffer;
         BufferPair lookAtIndicesBuffer;
+        BufferPair jfgNormalsBuffer; // JFG PORT
         BufferPair faceIndicesBuffer;
         BufferPair modifyPosUintsBuffer;
         BufferPair rdpParamsBuffer;
@@ -186,6 +191,7 @@ namespace RT64 {
         // JFG PORT: the world position of every vertex for the raster shaders (RSPProcessCS, RasterVS). Its own buffer:
         // VertexProcessor rewrites worldPosBuffer.
         ComputedBuffer jfgWorldPosBuffer;
+        ComputedBuffer jfgWorldNormBuffer; // JFG PORT: a character's normal in the world, w = object slot + 1 (or 0)
         ComputedBuffer worldNormBuffer;
         ComputedBuffer worldVelBuffer;
         ComputedBuffer testZIndexBuffer;
@@ -229,6 +235,7 @@ namespace RT64 {
         std::vector<SpriteCommand> spriteCommands;
         std::vector<interop::PointLight> pointLights;
         std::vector<interop::PointLight> jfgCasters; // JFG PORT: the frame's shadow casters (rt64_jfg_frame_casters)
+        std::vector<interop::JfgObjectLight> jfgObjects; // JFG PORT: the frame's lit characters and objects, by slot
         uint32_t fbPairCount;
         uint32_t fbPairSubmitted;
         uint32_t gameCallCount;

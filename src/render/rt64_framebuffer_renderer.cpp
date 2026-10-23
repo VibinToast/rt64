@@ -365,6 +365,8 @@ namespace RT64 {
         descCommonSet->setBuffer(descCommonSet->jfgWorldPos, outputBuffers->jfgWorldPosBuffer.buffer.get(), outputBuffers->jfgWorldPosBuffer.allocatedSize);
         descCommonSet->setBuffer(descCommonSet->jfgLights, jfgLightsBuffer.get(), sizeof(interop::JfgLight) * jfgLights.size(), RenderBufferStructuredView(sizeof(interop::JfgLight)));
         descCommonSet->setBuffer(descCommonSet->jfgCasters, jfgCastersBuffer.get(), sizeof(hlslpp::float4) * jfgCasters.size(), RenderBufferStructuredView(sizeof(hlslpp::float4)));
+        descCommonSet->setBuffer(descCommonSet->jfgWorldNorm, outputBuffers->jfgWorldNormBuffer.buffer.get(), outputBuffers->jfgWorldNormBuffer.allocatedSize);
+        descCommonSet->setBuffer(descCommonSet->jfgObjects, jfgObjectsBuffer.get(), sizeof(interop::JfgObjectLight) * jfgObjects.size(), RenderBufferStructuredView(sizeof(interop::JfgObjectLight)));
 
 #   if RT_ENABLED
         if (raytracingEnabled) {
@@ -2400,7 +2402,14 @@ namespace RT64 {
         checkRasterScene(rasterScene);
     }
 
-    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, const std::vector<interop::PointLight> &casters, float curFrameWeight) {
+    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, const std::vector<interop::PointLight> &casters,
+        const std::vector<interop::JfgObjectLight> &objects, float curFrameWeight)
+    {
+        jfgObjects = objects;
+        if (jfgObjects.empty()) {
+            jfgObjects.emplace_back(); // the upload needs one
+        }
+
         // JFG PORT: the game's lights (State::fullSync), at most MaxLights (the port sends the nearest first). Linear
         // falloff from the inner radius (pointRadius) to the radius (attenuationRadius). On in-between frames a light is
         // placed back along how far it moved since the game frame before (direction, see rt64_jfg_frame_lights), as
@@ -2444,7 +2453,8 @@ namespace RT64 {
             { renderIndicesVector.data(), { 0, renderIndicesVector.size() }, sizeof(interop::RenderIndices), RenderBufferFlag::STORAGE, { }, &renderIndicesBuffer},
             { &frameParams, { 0, 1 }, sizeof(interop::FrameParams), RenderBufferFlag::CONSTANT, { }, &frameParamsBuffer},
             { jfgLights.data(), { 0, jfgLights.size() }, sizeof(interop::JfgLight), RenderBufferFlag::STORAGE, { }, &jfgLightsBuffer }, // JFG PORT
-            { jfgCasters.data(), { 0, jfgCasters.size() }, sizeof(hlslpp::float4), RenderBufferFlag::STORAGE, { }, &jfgCastersBuffer }
+            { jfgCasters.data(), { 0, jfgCasters.size() }, sizeof(hlslpp::float4), RenderBufferFlag::STORAGE, { }, &jfgCastersBuffer },
+            { jfgObjects.data(), { 0, jfgObjects.size() }, sizeof(interop::JfgObjectLight), RenderBufferFlag::STORAGE, { }, &jfgObjectsBuffer }
         };
 
 #   if RT_ENABLED

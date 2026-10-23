@@ -19,6 +19,8 @@
 StructuredBuffer<JfgLight> jfgLights : register(t69, space0);
 // ... and the shadow casters (characters and objects): xyz = a sphere's centre, w = its radius.
 StructuredBuffer<float4> jfgCasters : register(t70, space0);
+// ... and how the frame's characters and objects are lit, by slot (FramebufferRenderer::setJfgLights).
+StructuredBuffer<JfgObjectLight> jfgObjects : register(t72, space0);
 
 // JFG PORT: how much of a light reaching p is left after the casters between them: each sphere blocks the part of the
 // line from p to the light that passes within its radius, softly over half a radius either side. A caster the light
@@ -30,8 +32,8 @@ float jfgShadowVisibility(float3 p, float3 lightPos, uint casterCount, float dar
     float visibility = 1.0f;
     for (uint c = 0; c < casterCount; c++) {
         const float4 caster = jfgCasters[c];
-        if (distance(caster.xyz, lightPos) < caster.w * 1.5f) {
-            continue;
+        if ((distance(caster.xyz, lightPos) < caster.w * 1.5f) || (distance(caster.xyz, p) < caster.w)) {
+            continue; // the light is in it, or the pixel is on the caster itself
         }
 
         const float3 toCaster = caster.xyz - p;
@@ -79,7 +81,7 @@ float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
 #endif
 
 LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float2 vertexUV, float4 vertexSmoothColor, float4 vertexFlatColor,
-    float4 vertexWorldPos, bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
+    float4 vertexWorldPos, float4 vertexWorldNorm, bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
 {
     const OtherMode otherMode = { rp.omL, rp.omH };
 #if defined(DYNAMIC_RENDER_PARAMS)
@@ -206,6 +208,42 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // JFG PORT: the game's dynamic lights on the level, per pixel. The game adds them to the level's vertex colours on
     // the CPU (trackLightAsm, skipped while this is on), so they go into the shade colour here, before the combiner
     // multiplies it with the texture: full strength within the inner radius, linear to nothing at the radius.
+    // JFG PORT: characters and objects, lit as the game lights them but per pixel with the model's own normals
+    // (vertexWorldNorm.w = object slot + 1): base colour (in the vertex colour) x (ambient, scaled with the level's,
+    // + each of the game's directions by how much the surface faces it), then the frame's lights by the object's
+    // share of them.
+    if ((vertexWorldNorm.w > 0.5f) && (vertexWorldPos.w > 0.5f)) {
+        const JfgObjectLight object = jfgObjects[uint(vertexWorldNorm.w + 0.5f) - 1];
+        const float3 n = normalize(vertexWorldNorm.xyz);
+        float brightness = object.params.x * (float(gConstants.padding.x >> 24) / 128.0f);
+        for (uint k = 0; k < uint(object.params.y + 0.5f); k++) {
+            brightness += object.dirs[k].w * saturate(dot(n, normalize(object.dirs[k].xyz)));
+        }
+
+        float3 added = float3(0.0f, 0.0f, 0.0f);
+        const float share = object.params.z;
+        if (share > 0.0f) {
+            const uint lightCount = gConstants.padding.y & 0xFFFF;
+            const uint casterCount = gConstants.padding.y >> 16;
+            const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
+            const float facing = saturate(asfloat(gConstants.padding.z));
+            for (uint i = 0; i < lightCount; i++) {
+                const JfgLight light = jfgLights[i];
+                const float radius = light.posRadius.w;
+                const float3 toLight = light.posRadius.xyz - vertexWorldPos.xyz;
+                const float d = length(toLight);
+                if (d < radius) {
+                    const float inner = min(light.colorInner.w, radius - 1.0f);
+                    const float towards = saturate(dot(n, toLight / max(d, 0.001f)));
+                    const float visibility = (darkness > 0.0f) ? jfgShadowVisibility(vertexWorldPos.xyz, light.posRadius.xyz, casterCount, darkness) : 1.0f;
+                    added += light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * lerp(1.0f, towards, facing) * visibility;
+                }
+            }
+        }
+
+        shadeColor.rgb = saturate(shadeColor.rgb * (saturate(brightness) + added * share));
+    }
+
     // Facing (padding.z): how much a surface turned away from a light gets less of it, which the game never does.
     if ((gConstants.padding.x & RASTER_JFG_LEVEL) && (vertexWorldPos.w > 0.5f)) {
         const float facing = saturate(asfloat(gConstants.padding.z));
@@ -365,6 +403,7 @@ void PSMain(
     , nointerpolation in float4 vertexFlatColor : COLOR1
 #endif
     , in float4 vertexWorldPos : TEXCOORD1 // JFG PORT: last, as in RasterVS
+    , in float4 vertexWorldNorm : TEXCOORD2
 #if defined(DYNAMIC_RENDER_PARAMS)
     , bool isFrontFace : SV_IsFrontFace
 #endif
@@ -381,7 +420,7 @@ void PSMain(
     float4 resultColor;
     float4 resultAlpha;
     float resultDepth;
-    if (!RasterPS(getRenderParams(), vertexPosition, vertexUV, vertexSmoothColor, vertexFlatColor, vertexWorldPos, isFrontFace, resultColor, resultAlpha)) {
+    if (!RasterPS(getRenderParams(), vertexPosition, vertexUV, vertexSmoothColor, vertexFlatColor, vertexWorldPos, vertexWorldNorm, isFrontFace, resultColor, resultAlpha)) {
         discard;
     }
 

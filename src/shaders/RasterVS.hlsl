@@ -14,8 +14,10 @@
 // JFG PORT: the world position of every vertex the RSP processed (RSPProcessCS, the workload's jfgWorldPosBuffer,
 // float4 per vertex; FramebufferRendererDescriptorCommonSet::jfgWorldPos). Indexed draws read it by SV_VertexID.
 ByteAddressBuffer jfgWorldPos : register(t68, space0);
+// ... and a character's normal in the world (jfgWorldNormBuffer; w = object slot + 1, 0 = not a character).
+ByteAddressBuffer jfgWorldNorm : register(t71, space0);
 
-LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in float2 iUV, in float4 iColor, in uint iVertexId, out float4 oPosition, out float2 oUV, out float4 oSmoothColor, out float4 oFlatColor, out float4 oWorldPos) {
+LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in float2 iUV, in float4 iColor, in uint iVertexId, out float4 oPosition, out float2 oUV, out float4 oSmoothColor, out float4 oFlatColor, out float4 oWorldPos, out float4 oWorldNorm) {
     float4 ndcPos = iPosition;
     
     // Skip any sort of transformation on the coordinates when rendering rects.
@@ -44,8 +46,10 @@ LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in floa
 
     // JFG PORT: w = 1 marks a valid world position (indexed draws only).
     oWorldPos = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    oWorldNorm = float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (gConstants.padding.x & RASTER_JFG_INDEXED) {
         oWorldPos = float4(asfloat(jfgWorldPos.Load3(iVertexId * 16)), 1.0f);
+        oWorldNorm = asfloat(jfgWorldNorm.Load4(iVertexId * 16));
     }
 }
 
@@ -71,11 +75,12 @@ void VSMain(
     , out float4 oFlatColor : COLOR1
 #endif
     , out float4 oWorldPos : TEXCOORD1 // JFG PORT: last, so the interface locations match RasterPS's
+    , out float4 oWorldNorm : TEXCOORD2
 )
 {
 #if !defined(DYNAMIC_RENDER_PARAMS) && !defined(VERTEX_FLAT_COLOR)
     float4 oFlatColor;
 #endif
-    RasterVS(getRenderParams(), iPosition, iUV, iColor, iVertexId, oPosition, oUV, oSmoothColor, oFlatColor, oWorldPos);
+    RasterVS(getRenderParams(), iPosition, iUV, iColor, iVertexId, oPosition, oUV, oSmoothColor, oFlatColor, oWorldPos, oWorldNorm);
 }
 #endif

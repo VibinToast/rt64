@@ -981,6 +981,7 @@ namespace RT64 {
             dst.color.g = *state->fromRDRAM((src + 7) ^ 0x3);
             dst.color.b = *state->fromRDRAM((src + 8) ^ 0x3);
             dst.color.a = *state->fromRDRAM((src + 9) ^ 0x3);
+            jfgNormals[dstIndex + i] = DKR.jfg ? state->jfgObjectNormal(src) : 0; // JFG PORT
         }
 
         // F3DDKR billboards transform vertex zero with the regular MVP, then
@@ -1353,6 +1354,8 @@ namespace RT64 {
             lightIndices.emplace_back(curLightIndex);
             lightCounts.emplace_back(curLightCount);
             lookAtIndices.emplace_back(curLookAtIndex);
+            workload.drawData.jfgNormals.emplace_back(jfgNormals[i]); // JFG PORT
+            jfgNormals[i] = 0;
             indices[i] = uint32_t(globalIndex) + (i - dstIndex);
             used[i] = false;
 
@@ -1449,6 +1452,7 @@ namespace RT64 {
             const auto lightIndex = lightIndices[globalIndex];
             const auto lightCount = lightCounts[globalIndex];
             const auto lookAtIndex = lookAtIndices[globalIndex];
+            const uint32_t jfgNormal = workload.drawData.jfgNormals[globalIndex]; // JFG PORT
             const auto transformedPos = posTransformed[globalIndex];
             const auto screenPos = posScreen[globalIndex];
 
@@ -1472,6 +1476,7 @@ namespace RT64 {
             lightIndices.emplace_back(lightIndex);
             lightCounts.emplace_back(lightCount);
             lookAtIndices.emplace_back(lookAtIndex);
+            workload.drawData.jfgNormals.emplace_back(jfgNormal); // JFG PORT
             posTransformed.emplace_back(transformedPos);
             posScreen.emplace_back(screenPos);
             indices[dstIndex] = newIndex;

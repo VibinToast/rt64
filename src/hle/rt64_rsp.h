@@ -160,6 +160,7 @@ namespace RT64 {
         std::array<Vertex, RSP_MAX_VERTICES> vertices;
         std::array<uint32_t, RSP_MAX_VERTICES> indices;
         std::bitset<RSP_MAX_VERTICES> used;
+        std::array<uint32_t, RSP_MAX_VERTICES> jfgNormals = {}; // JFG PORT: see DrawData::jfgNormals
         std::array<Light, RSP_MAX_LIGHTS + 1> lights;
         int lightCount;
         uint32_t vertexFogIndex;

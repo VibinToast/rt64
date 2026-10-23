@@ -154,6 +154,8 @@ namespace RT64 {
         uint32_t jfgWorldPos; // JFG PORT: see below
         uint32_t jfgLights;
         uint32_t jfgCasters;
+        uint32_t jfgWorldNorm;
+        uint32_t jfgObjects;
         uint32_t gLinearWrapWrapSampler;
         uint32_t gLinearWrapMirrorSampler;
         uint32_t gLinearWrapClampSampler;
@@ -232,6 +234,8 @@ namespace RT64 {
             jfgWorldPos = builder.addByteAddressBuffer(68);
             jfgLights = builder.addStructuredBuffer(69); // the frame's lights (RasterPS)
             jfgCasters = builder.addStructuredBuffer(70); // the frame's shadow casters (RasterPS)
+            jfgWorldNorm = builder.addByteAddressBuffer(71); // characters' normals in the world (RasterVS)
+            jfgObjects = builder.addStructuredBuffer(72); // how the frame's characters are lit (RasterPS)
             gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
             gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
             gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());
@@ -539,6 +543,8 @@ namespace RT64 {
         uint32_t dstTc;
         uint32_t dstCol;
         uint32_t dstWorldPos; // JFG PORT: see RSPProcessCS
+        uint32_t srcJfgNormals;
+        uint32_t dstWorldNorm;
 
         RSPProcessDescriptorSet(RenderDevice *device = nullptr) {
             builder.begin();
@@ -564,6 +570,8 @@ namespace RT64 {
             dstTc = builder.addReadWriteStructuredBuffer(20);
             dstCol = builder.addReadWriteStructuredBuffer(21);
             dstWorldPos = builder.addReadWriteStructuredBuffer(22);
+            srcJfgNormals = builder.addFormattedBuffer(23);
+            dstWorldNorm = builder.addReadWriteStructuredBuffer(24);
             builder.end();
 
             if (device != nullptr) {

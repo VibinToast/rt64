@@ -283,7 +283,7 @@ namespace RT64 {
         vss << std::string_view(RenderParamsText, sizeof(RenderParamsText));
         vss << "RenderParams getRenderParams() {" + renderParamsCode + "; return rp; }";
         vss <<
-            "void RasterVS(const RenderParams, in float4, in float2, in float4, in uint, out float4, out float2, out float4, out float4, out float4);"
+            "void RasterVS(const RenderParams, in float4, in float2, in float4, in uint, out float4, out float2, out float4, out float4, out float4, out float4);"
             "[shader(\"vertex\")]"
             "void VSMain("
             "   in float4 iPosition : POSITION,"
@@ -299,13 +299,13 @@ namespace RT64 {
         }
 
         // JFG PORT: the world position (RasterVS), last so the interface locations match the pixel shader's.
-        vss << ", out float4 oWorldPos : TEXCOORD1) {";
+        vss << ", out float4 oWorldPos : TEXCOORD1, out float4 oWorldNorm : TEXCOORD2) {";
         if (desc.flags.smoothShade) {
             vss << " float4 oFlatColor;";
         }
 
         vss <<
-            "   RasterVS(getRenderParams(), iPosition, iUV, iColor, iVertexId, oPosition, oUV, oSmoothColor, oFlatColor, oWorldPos);"
+            "   RasterVS(getRenderParams(), iPosition, iUV, iColor, iVertexId, oPosition, oUV, oSmoothColor, oFlatColor, oWorldPos, oWorldNorm);"
             "}";
 
         // Generate pixel shader.
@@ -313,7 +313,7 @@ namespace RT64 {
         pss << std::string_view(RenderParamsText, sizeof(RenderParamsText));
         pss << "RenderParams getRenderParams() {" + renderParamsCode + "; return rp; }";
         pss <<
-            "bool RasterPS(const RenderParams, float4, float2, float4, float4, float4, bool, out float4, out float4);"
+            "bool RasterPS(const RenderParams, float4, float2, float4, float4, float4, float4, bool, out float4, out float4);"
             "[shader(\"pixel\")]"
             "void PSMain("
             "  in float4 vertexPosition : SV_POSITION"
@@ -324,7 +324,7 @@ namespace RT64 {
             pss << ", nointerpolation in float4 vertexFlatColor : COLOR1";
         }
 
-        pss << ", in float4 vertexWorldPos : TEXCOORD1"; // JFG PORT: see RasterVS
+        pss << ", in float4 vertexWorldPos : TEXCOORD1, in float4 vertexWorldNorm : TEXCOORD2"; // JFG PORT: see RasterVS
         pss <<
             ", out float4 pixelColor : SV_TARGET0"
             ", out float4 pixelAlpha : SV_TARGET1"
@@ -337,7 +337,7 @@ namespace RT64 {
         pss <<
             "   float4 resultColor;"
             "   float4 resultAlpha;"
-            "   if (!RasterPS(getRenderParams(), vertexPosition, vertexUV, vertexSmoothColor, vertexFlatColor, vertexWorldPos, false, resultColor, resultAlpha)) discard;"
+            "   if (!RasterPS(getRenderParams(), vertexPosition, vertexUV, vertexSmoothColor, vertexFlatColor, vertexWorldPos, vertexWorldNorm, false, resultColor, resultAlpha)) discard;"
             "   pixelColor = resultColor;"
             "   pixelAlpha = resultAlpha;"
             "}";
