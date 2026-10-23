@@ -76,6 +76,7 @@ std::atomic<uint32_t> rt64_jfg_fog_color{ 0xA0B4C8u }; // 0xRRGGBB
 std::atomic<int> rt64_jfg_vignette{ 0 };       // vignette (VignettePS.hlsl)
 std::atomic<int> rt64_jfg_pixel_lights{ 0 };   // the game's lights on the level per pixel (RasterPS, src/jfg/jfg_lighting.cpp)
 std::atomic<int> rt64_jfg_debug_world{ 0 };    // show the world position as colour (RasterPS; F9 Lighting tab, RT64_JFG_DEBUG_WORLD)
+std::atomic<int> rt64_jfg_debug_shadow{ 0 };   // paint the casters' shadows red (RasterPS; F9 Lighting tab)
 std::atomic<int> rt64_jfg_debug_normal{ 0 };   // show the surface direction as colour (RasterPS; F9 Lighting tab)
 std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting depends on facing the light, 0-1 (RasterPS)
 std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
@@ -520,6 +521,7 @@ namespace RT64 {
         interop::RasterParams rasterParams = {};
         const bool jfgDebugWorld = rt64_jfg_debug_world.load(std::memory_order_relaxed) != 0; // JFG PORT: see RasterPS
         const bool jfgDebugNormal = rt64_jfg_debug_normal.load(std::memory_order_relaxed) != 0;
+        const bool jfgDebugShadow = rt64_jfg_debug_shadow.load(std::memory_order_relaxed) != 0;
         const float jfgFacing = rt64_jfg_facing.load(std::memory_order_relaxed);
         const uint32_t jfgShadows = uint32_t(std::clamp(rt64_jfg_shadows.load(std::memory_order_relaxed), 0.0f, 1.0f) * 255.0f + 0.5f);
         const uint32_t jfgAmbient = uint32_t(std::clamp(rt64_jfg_level_ambient.load(std::memory_order_relaxed), 0.0f, 1.99f) * 128.0f + 0.5f);
@@ -1119,7 +1121,8 @@ namespace RT64 {
                 rasterParams.screenOffset = triangles.screenOffset;
                 rasterParams.padding.x = ((drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ? RASTER_JFG_INDEXED : 0) |
                     (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | (triangles.jfgLevel ? RASTER_JFG_LEVEL : 0) |
-                    (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0) | (jfgShadows << 16) | (jfgAmbient << 24); // JFG PORT: see RasterVS, RasterPS
+                    (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0) |
+                    (jfgDebugShadow ? RASTER_JFG_DEBUG_SHADOW : 0) | (jfgShadows << 16) | (jfgAmbient << 24); // JFG PORT: see RasterVS, RasterPS
                 rasterParams.padding.y = (jfgPixelLights ? jfgLightCount : 0) | (jfgCasterCount << 16);
                 memcpy(&rasterParams.padding.z, &jfgFacing, sizeof(float));
                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);

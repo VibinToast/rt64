@@ -17,33 +17,67 @@
 
 // JFG PORT: the frame's lights for the per-pixel level lighting (FramebufferRenderer::setJfgLights), padding.y of them.
 StructuredBuffer<JfgLight> jfgLights : register(t69, space0);
-// ... and the shadow casters (characters and objects): xyz = a sphere's centre, w = its radius.
+// ... and the shadow casters (characters and objects): xyz = a sphere's centre, resting on the ground, w = its radius
+// (worked out from the size of the game's own shadow for it).
 StructuredBuffer<float4> jfgCasters : register(t70, space0);
 // ... and how the frame's characters and objects are lit, by slot (FramebufferRenderer::setJfgLights).
 StructuredBuffer<JfgObjectLight> jfgObjects : register(t72, space0);
 
-// JFG PORT: how much of a light reaching p is left after the casters between them: each sphere blocks the part of the
-// line from p to the light that passes within its radius, softly over half a radius either side. A caster the light
-// sits in (a lamp or torch object with a shadow of its own) doesn't block it.
+// JFG PORT: closest approach of segments p1-q1 and p2-q2: the distance, and where it is along p1-q1 (0-1).
+float2 jfgSegmentDistance(float3 p1, float3 q1, float3 p2, float3 q2) {
+    const float3 d1 = q1 - p1;
+    const float3 d2 = q2 - p2;
+    const float3 r = p1 - p2;
+    const float a = dot(d1, d1);
+    const float e = dot(d2, d2);
+    const float f = dot(d2, r);
+    const float c = dot(d1, r);
+    const float b = dot(d1, d2);
+    const float denom = a * e - b * b;
+    float s = (denom > 1e-6f) ? saturate((b * f - c * e) / denom) : 0.0f;
+    float t = (b * s + f) / e;
+    if (t < 0.0f) {
+        t = 0.0f;
+        s = (a > 1e-6f) ? saturate(-c / a) : 0.0f;
+    }
+    else if (t > 1.0f) {
+        t = 1.0f;
+        s = (a > 1e-6f) ? saturate((b - c) / a) : 0.0f;
+    }
+
+    return float2(length(p1 + d1 * s - (p2 + d2 * t)), s);
+}
+
+// JFG PORT: how much of a light reaching p is left after the casters between them. Each caster stands as a capsule
+// as tall as a character (3 x its radius, 0.6 x its radius thick, from the ground up), so a low torch throws a long
+// shadow; it blocks the part of the line from p to the light that passes within its thickness, softly over half of
+// it either side. A caster the light sits in (a lamp or torch object with a shadow of its own) doesn't block it, nor
+// one the pixel is on. The light is taken 40 units higher: torch lights sit at the bowl, as low as a character's
+// waist, which made every shadow a thin streak to the edge of the light.
 float jfgShadowVisibility(float3 p, float3 lightPos, uint casterCount, float darkness) {
-    const float3 toLight = lightPos - p;
-    const float len = length(toLight);
-    const float3 dir = toLight / max(len, 0.001f);
+    lightPos.y += 40.0f; // the game puts a torch's light at its bowl; shadows are thrown from the flame above it
+    if (distance(p, lightPos) < 0.001f) {
+        return 1.0f;
+    }
+
     float visibility = 1.0f;
     for (uint c = 0; c < casterCount; c++) {
         const float4 caster = jfgCasters[c];
-        if ((distance(caster.xyz, lightPos) < caster.w * 1.5f) || (distance(caster.xyz, p) < caster.w)) {
-            continue; // the light is in it, or the pixel is on the caster itself
-        }
-
-        const float3 toCaster = caster.xyz - p;
-        const float along = dot(toCaster, dir);
-        if ((along <= 0.0f) || (along >= len)) {
+        const float thick = caster.w * 0.6f;
+        const float ground = caster.y - caster.w;
+        const float3 bottom = float3(caster.x, ground + thick, caster.z);
+        const float3 top = float3(caster.x, ground + caster.w * 3.0f - thick, caster.z);
+        if ((jfgSegmentDistance(lightPos, lightPos, bottom, top).x < thick * 1.5f) ||
+            (jfgSegmentDistance(p, p, bottom, top).x < thick)) {
             continue;
         }
 
-        const float miss = length(toCaster - dir * along);
-        visibility *= 1.0f - darkness * (1.0f - smoothstep(caster.w * 0.5f, caster.w * 1.5f, miss));
+        const float2 hit = jfgSegmentDistance(p, lightPos, bottom, top);
+        if ((hit.y <= 0.0f) || (hit.y >= 1.0f)) {
+            continue; // closest behind the pixel or beyond the light
+        }
+
+        visibility *= 1.0f - darkness * (1.0f - smoothstep(thick * 0.5f, thick * 1.5f, hit.x));
     }
 
     return visibility;
@@ -255,8 +289,8 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const uint casterCount = gConstants.padding.y >> 16;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         const float ambient = float(gConstants.padding.x >> 24) / 128.0f; // the level's own colours are its ambient light
-        shadeColor.rgb *= ambient;
         float3 added = float3(0.0f, 0.0f, 0.0f);
+        float painted = 1.0f; // how much of the level's own colours a shadow leaves
         for (uint i = 0; i < lightCount; i++) {
             const JfgLight light = jfgLights[i];
             const float radius = light.posRadius.w;
@@ -266,11 +300,15 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
                 const float inner = min(light.colorInner.w, radius - 1.0f);
                 const float towards = saturate(dot(jfgNormal, toLight / max(d, 0.001f)));
                 const float visibility = (darkness > 0.0f) ? jfgShadowVisibility(vertexWorldPos.xyz, light.posRadius.xyz, casterCount, darkness) : 1.0f;
-                added += light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * lerp(1.0f, towards, facing) * visibility;
+                const float reach = saturate((radius - d) / (radius - inner));
+                added += light.colorInner.rgb * reach * lerp(1.0f, towards, facing) * visibility;
+                // The level's colours already hold the glow of its torches and lamps, so a shadow from one takes that
+                // too: as much as the light reaches there, up to three quarters of the colour.
+                painted *= 1.0f - 0.75f * reach * (1.0f - visibility);
             }
         }
 
-        shadeColor.rgb = saturate(shadeColor.rgb + added);
+        shadeColor.rgb = saturate(shadeColor.rgb * ambient * painted + added);
     }
     float4 combinerColor;
     float alphaCompareValue;
@@ -384,6 +422,21 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // JFG PORT: the surface direction as colour (x red, y green, z blue; up is green), magenta without a position.
     if (gConstants.padding.x & RASTER_JFG_DEBUG_NORMAL) {
         resultColor.rgb = (vertexWorldPos.w > 0.5f) ? (jfgNormal * 0.5f + 0.5f) : float3(1.0f, 0.0f, 1.0f);
+    }
+
+    // JFG PORT: the casters' shadows as red, at full darkness, from every light that reaches the surface.
+    if ((gConstants.padding.x & RASTER_JFG_DEBUG_SHADOW) && (vertexWorldPos.w > 0.5f)) {
+        const uint lightCount = gConstants.padding.y & 0xFFFF;
+        const uint casterCount = gConstants.padding.y >> 16;
+        float shadow = 0.0f;
+        for (uint i = 0; i < lightCount; i++) {
+            const JfgLight light = jfgLights[i];
+            if (distance(light.posRadius.xyz, vertexWorldPos.xyz) < light.posRadius.w) {
+                shadow = max(shadow, 1.0f - jfgShadowVisibility(vertexWorldPos.xyz, light.posRadius.xyz, casterCount, 1.0f));
+            }
+        }
+
+        resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 0.0f, 0.0f), shadow);
     }
     
     return true;
