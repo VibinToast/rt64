@@ -7,7 +7,10 @@
 #include <cassert>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
+#include <iterator>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -34,6 +37,64 @@
 // JFG PORT: the latest screen update's framebuffer and the number of screen updates (see State::updateScreen).
 std::atomic<uint32_t> rt64_jfg_screen_fb{ 0 };
 std::atomic<uint32_t> rt64_jfg_screen_updates{ 0 };
+
+// JFG PORT: the game's dynamic lights (its track lights: muzzle flashes, lamps, glowing pickups) for each frame, keyed
+// by the address of the frame's display list (src/jfg/jfg_lighting.cpp sends them when the game submits it). The game
+// double-buffers its display lists and waits for one to finish before building into it again, so a few slots are
+// enough. State::fullSync puts the frame's lights in workload.pointLights. 8 floats per light: x, y, z (game world),
+// radius, inner radius (full strength inside it, linear to 0 at the radius), r, g, b (0-1).
+namespace {
+    struct JfgLightFrame {
+        uint32_t dlStart = 0;
+        std::vector<interop::PointLight> lights;
+    };
+
+    std::mutex jfgLightMutex;
+    JfgLightFrame jfgLightFrames[4];
+    uint32_t jfgLightFrameNext = 0;
+}
+
+void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) {
+    std::lock_guard<std::mutex> lock(jfgLightMutex);
+    JfgLightFrame *frame = nullptr;
+    for (JfgLightFrame &f : jfgLightFrames) {
+        if (f.dlStart == dlStart) {
+            frame = &f;
+            break;
+        }
+    }
+
+    if (frame == nullptr) {
+        frame = &jfgLightFrames[jfgLightFrameNext];
+        jfgLightFrameNext = (jfgLightFrameNext + 1) % std::size(jfgLightFrames);
+    }
+
+    frame->dlStart = dlStart;
+    frame->lights.clear();
+    for (uint32_t i = 0; i < count; i++) {
+        const float *l = &data[i * 8];
+        interop::PointLight light = {};
+        light.position = { l[0], l[1], l[2] };
+        light.attenuationRadius = l[3];
+        light.pointRadius = l[4];
+        light.diffuseColor = { l[5], l[6], l[7] };
+        light.attenuationExponent = 1.0f; // linear, as the game's own falloff
+        frame->lights.emplace_back(light);
+    }
+}
+
+static bool jfgTakeFrameLights(uint32_t dlStart, std::vector<interop::PointLight> &dst) {
+    std::lock_guard<std::mutex> lock(jfgLightMutex);
+    for (JfgLightFrame &f : jfgLightFrames) {
+        if (f.dlStart == dlStart) {
+            dst.insert(dst.end(), f.lights.begin(), f.lights.end());
+            f.dlStart = 0;
+            return true;
+        }
+    }
+
+    return false;
+}
 
 namespace RT64 {
     const float ShiftScaleMap[] = {
@@ -2042,6 +2103,22 @@ namespace RT64 {
 
             // Indicate the next time a display list is parsed, RDRAM should be checked.
             rdramCheckPending = true;
+        }
+
+        // JFG PORT: the game's lights for this frame (see rt64_jfg_frame_lights).
+        if (jfgTakeFrameLights(jfgDlStart, workload.pointLights)) {
+            static const bool log = std::getenv("RT64_JFG_DEBUG_LIGHTS") != nullptr;
+            static uint32_t frames = 0, logged = 0;
+            if (log && !workload.pointLights.empty() && (logged < 200) && ((frames++ % 30) == 0)) {
+                logged++;
+                fprintf(stderr, "[rt64] frame %u dl %08X lights %zu", frames, jfgDlStart, workload.pointLights.size());
+                for (const interop::PointLight &l : workload.pointLights) {
+                    fprintf(stderr, " | %.0f %.0f %.0f r %.0f/%.0f c %.2f %.2f %.2f", l.position.x, l.position.y, l.position.z,
+                        l.attenuationRadius, l.pointRadius, l.diffuseColor.x, l.diffuseColor.y, l.diffuseColor.z);
+                }
+
+                fprintf(stderr, "\n");
+            }
         }
 
 #   if SCRIPT_ENABLED
