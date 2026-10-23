@@ -115,6 +115,8 @@ namespace RT64 {
         BufferPair jfgShadowIndicesBuffer;
         RenderIndexBufferView jfgShadowIndexView;
         std::vector<hlslpp::float4> jfgShadowLights; // xyz = where the shadows are thrown from, w = far
+        hlslpp::float4 jfgSunShadow = { 0.0f, 0.0f, 0.0f, 0.0f }; // the directional light's map: centre, half size (0 = none)
+        float jfgSunRange = 4000.0f; // ... its depth half range
         uint32_t jfgShadowTile = 0;
         bool jfgShadowAtlasReadable = false;
         std::unique_ptr<RenderTexture> jfgShadowAtlas;

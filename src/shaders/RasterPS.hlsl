@@ -25,6 +25,35 @@ StructuredBuffer<JfgFrame> jfgFrame : register(t70, space0);
 // ... and the shadow maps of the nearest lights: a cube each, one atlas row of six faces (JfgShadow.hlsli).
 Texture2D<float> jfgShadowMap : register(t73, space0);
 
+// JFG PORT: the share of the shadow map around pos (texels, in a size x size area at origin) that is not nearer than
+// depth: each of 3 x 3 neighbours compared at the four texels around it and blended by where pos falls between them
+// (bilinear comparison), so shadow edges are smooth instead of stepped. linearize: stored values are cube depths
+// (turned back into distances with near / far) rather than the directional map's plain depths.
+float jfgShadowLit(float2 pos, int2 origin, int size, float depth, bool linearize, float nearPlane, float farPlane) {
+    const float2 p = pos - 0.5f;
+    const int2 base = int2(floor(p));
+    const float2 f = p - float2(base);
+    float lit = 0.0f;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            float s[4];
+            for (int k = 0; k < 4; k++) {
+                const int2 t = clamp(base + int2(dx + (k & 1), dy + (k >> 1)), int2(0, 0), int2(size - 1, size - 1));
+                float stored = jfgShadowMap.Load(int3(origin + t, 0));
+                if (linearize) {
+                    stored = jfgShadowDistance(stored, nearPlane, farPlane);
+                }
+
+                s[k] = (depth <= stored) ? 1.0f : 0.0f;
+            }
+
+            lit += lerp(lerp(s[0], s[1], f.x), lerp(s[2], s[3], f.x), f.y);
+        }
+    }
+
+    return lit / 9.0f;
+}
+
 // JFG PORT: how much of a light reaches p, from its shadow cube (FramebufferRenderer::recordJfgShadows): the face that
 // looks towards p, p's distance along it against the nearest surface the light sees there, over 3 x 3 texels for a
 // soft edge. p is pushed a little towards the light first, along its surface, so a surface doesn't shadow itself. A
@@ -52,19 +81,46 @@ float jfgShadowVisibility(float3 p, float3 n, JfgLight light, float darkness) {
 
     // NDC x right, y up; the viewport puts y = +1 at the tile's top row.
     const float2 ndc = f.xy / f.z;
-    const int2 texel = int2(float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f) * float(tile));
+    const float2 pos = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f) * float(tile);
     const int2 origin = int2(int(face) * tile, int(row - 1) * tile);
     const float bias = 0.5f + f.z * 0.01f;
-    float lit = 0.0f;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            const int2 t = clamp(texel + int2(dx, dy), int2(0, 0), int2(tile - 1, tile - 1));
-            const float stored = jfgShadowMap.Load(int3(origin + t, 0));
-            lit += ((f.z - bias) <= jfgShadowDistance(stored, nearPlane, farPlane)) ? 1.0f : 0.0f;
-        }
+    const float lit = jfgShadowLit(pos, origin, tile, f.z - bias, true, nearPlane, farPlane);
+    return 1.0f - darkness * jfgFrame[0].shadowFade[row - 1] * (1.0f - lit);
+}
+
+// JFG PORT: how much of the directional light reaches p, from its shadow map (orthographic, two tiles square below
+// the cubes; FramebufferRenderer::setJfgLights / recordJfgShadows): 3 x 3 texels for a soft edge, lit outside it.
+float jfgSunVisibility(float3 p, float3 n, float darkness) {
+    const JfgFrame f = jfgFrame[0];
+    if ((f.sunShadow.w <= 0.0f) || (darkness <= 0.0f)) {
+        return 1.0f;
     }
 
-    return 1.0f - darkness * jfgFrame[0].shadowFade[row - 1] * (1.0f - lit / 9.0f);
+    uint width, height;
+    jfgShadowMap.GetDimensions(width, height);
+    const int tile = int(width / 6);
+    float3 right, up, forward;
+    jfgSunBasis(f.sunDir.xyz, right, up, forward);
+    // Pushed off the surface by about a texel and a half (along it, towards the light), and compared with a bias of
+    // two texels: a slope at a low angle to the light otherwise shadows itself in a fine pattern.
+    const int size = tile * 2;
+    const float texelWorld = 2.0f * f.sunShadow.w / float(size);
+    const float3 side = (dot(n, f.sunDir.xyz) < 0.0f) ? -n : n;
+    const float3 v = (p + side * texelWorld * 1.5f + f.sunDir.xyz * texelWorld) - f.sunShadow.xyz;
+    const float2 ndc = float2(dot(v, right), dot(v, up)) / f.sunShadow.w;
+    if (any(abs(ndc) >= 1.0f)) {
+        return 1.0f;
+    }
+
+    const float range = f.extra.y;
+    const float depth = (dot(v, forward) + range) / (2.0f * range);
+    const int2 origin = int2(0, tile * 4);
+    const float2 pos = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f) * float(size);
+    const float bias = texelWorld * 2.0f / (2.0f * range);
+    const float lit = jfgShadowLit(pos, origin, size, depth - bias, false, 0.0f, 0.0f);
+    // Fade out towards the map's edge rather than stop at a line.
+    const float edge = saturate((1.0f - max(abs(ndc.x), abs(ndc.y))) * 8.0f);
+    return 1.0f - darkness * edge * (1.0f - lit);
 }
 
 // JFG PORT: the surface direction tilted by the texture's detail: the texture's brightness taken as a height (height =
@@ -315,7 +371,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
 
         if (jfgF.sunDir.w > 0.5f) {
-            const float3 sun = jfgF.sunColor.rgb * jfgF.sunColor.w;
+            const float3 sun = jfgF.sunColor.rgb * jfgF.sunColor.w * jfgSunVisibility(vertexWorldPos.xyz, n, darkness);
             brightness += sun * saturate(dot(nb, jfgF.sunDir.xyz));
             jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
         }
@@ -377,8 +433,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
 
         if (jfgF.sunDir.w > 0.5f) {
-            added += jfgF.sunColor.rgb * saturate(dot(nb, jfgF.sunDir.xyz));
-            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, jfgF.sunColor.rgb, jfgShineStrength, jfgSharpness);
+            const float3 sun = jfgF.sunColor.rgb * jfgSunVisibility(vertexWorldPos.xyz, jfgNormal, darkness);
+            added += sun * saturate(dot(nb, jfgF.sunDir.xyz));
+            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
         }
 
         shadeColor.rgb = saturate(shadeColor.rgb * ambient * painted + added);
@@ -498,7 +555,8 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         resultColor.rgb = (vertexWorldPos.w > 0.5f) ? (jfgNormal * 0.5f + 0.5f) : float3(1.0f, 0.0f, 1.0f);
     }
 
-    // JFG PORT: the lights' shadows as red, at full darkness, from every light that reaches the surface.
+    // JFG PORT: the lights' shadows as red, at full darkness, from every light that reaches the surface and from the
+    // directional light.
     if ((gConstants.padding.x & RASTER_JFG_DEBUG_SHADOW) && (vertexWorldPos.w > 0.5f)) {
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         float shadow = 0.0f;
@@ -507,6 +565,10 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             if (distance(light.posRadius.xyz, vertexWorldPos.xyz) < light.posRadius.w) {
                 shadow = max(shadow, 1.0f - jfgShadowVisibility(vertexWorldPos.xyz, jfgNormal, light, 1.0f));
             }
+        }
+
+        if (jfgFrame[0].sunDir.w > 0.5f) {
+            shadow = max(shadow, 1.0f - jfgSunVisibility(vertexWorldPos.xyz, jfgNormal, 1.0f));
         }
 
         resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 0.0f, 0.0f), shadow);

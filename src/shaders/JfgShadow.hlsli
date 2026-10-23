@@ -9,6 +9,15 @@
 //
 
 #define JFG_SHADOW_LIFT 40.0f
+#define JFG_SUN_FACE 6 // JfgShadowVS: the directional light's map, below the cubes (two tiles square)
+
+// The directional light's view: looking along -towardsSun, x right, y up (world up unless it looks straight down).
+void jfgSunBasis(float3 towardsSun, out float3 right, out float3 up, out float3 forward) {
+    forward = -towardsSun;
+    const float3 worldUp = (abs(forward.y) > 0.99f) ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+    right = normalize(cross(worldUp, forward));
+    up = cross(forward, right);
+}
 
 // The light-space vector v as (tile x, tile y, distance along the face's axis) for one face.
 float3 jfgShadowFace(float3 v, uint face) {

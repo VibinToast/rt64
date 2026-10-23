@@ -86,7 +86,8 @@ std::atomic<int> rt64_jfg_shadow_size{ 512 };  // each shadow map face's size in
 // JFG PORT: the lighting settings that go to the shaders each frame (src/jfg/jfg_lighting.cpp), as floats:
 //   0-2 direction towards the directional light, 3 on (0/1), 4-6 its colour x intensity, 7 how much it lights
 //   characters, 8 surface detail height, 9 shine strength, 10 shine sharpness, 11 how much a shadow takes from the
-//   level's painted glow, 12 share of the surface detail on characters and objects.
+//   level's painted glow, 12 share of the surface detail on characters and objects, 13 the directional light casts
+//   shadows (0/1), 14 the size of the area around the view it shadows.
 static std::mutex jfgParamsMutex;
 static float jfgParams[16] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
@@ -2539,7 +2540,28 @@ namespace RT64 {
         }
 
         frame.shadowFade = { fade[0], fade[1], fade[2], fade[3] };
-        frame.extra = { params[12], 0.0f, 0.0f, 0.0f };
+        frame.extra = { params[12], jfgSunRange, 0.0f, 0.0f };
+
+        // The directional light's shadow map: a square around where the camera looks ([1] of the frame's points),
+        // moved only in whole texels across the light's view so its edges don't crawl as the camera moves.
+        jfgSunShadow = { 0.0f, 0.0f, 0.0f, 0.0f };
+        if ((frame.sunDir.w > 0.5f) && (params[13] > 0.5f) && (shadowed > 0 || rt64_jfg_shadows.load(std::memory_order_relaxed) > 0.0f) && (points.size() >= 2)) {
+            const interop::PointLight &f = points[1];
+            const hlslpp::float3 focus = { float(f.position.x - f.direction.x * back), float(f.position.y - f.direction.y * back), float(f.position.z - f.direction.z * back) };
+            const float half = std::clamp(params[14], 250.0f, 8000.0f);
+            const hlslpp::float3 forward = -sunDir;
+            const hlslpp::float3 worldUp = (fabsf(float(forward.y)) > 0.99f) ? hlslpp::float3(0.0f, 0.0f, 1.0f) : hlslpp::float3(0.0f, 1.0f, 0.0f);
+            const hlslpp::float3 right = hlslpp::normalize(hlslpp::cross(worldUp, forward));
+            const hlslpp::float3 up = hlslpp::cross(forward, right);
+            const float texel = std::max(half / float(std::max(jfgShadowTile, 1U)), 0.001f); // 2 x half over 2 tiles
+            const float x = floorf(float(hlslpp::dot(focus, right)) / texel) * texel;
+            const float y = floorf(float(hlslpp::dot(focus, up)) / texel) * texel;
+            const float z = float(hlslpp::dot(focus, forward));
+            const hlslpp::float3 centre = right * x + up * y + forward * z;
+            jfgSunShadow = { float(centre.x), float(centre.y), float(centre.z), half };
+        }
+
+        frame.sunShadow = jfgSunShadow;
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
@@ -2628,7 +2650,7 @@ namespace RT64 {
     // JFG PORT: the shadow atlas at the size set (six faces a row, JfgShadowRows rows). A replaced one is kept until
     // the next workload, as the command list being recorded may still use it.
     void FramebufferRenderer::updateJfgShadowAtlas(RenderWorker *worker) {
-        const uint32_t tile = uint32_t(std::clamp(rt64_jfg_shadow_size.load(std::memory_order_relaxed), 128, 2048));
+        const uint32_t tile = uint32_t(std::clamp(rt64_jfg_shadow_size.load(std::memory_order_relaxed), 128, 1024));
         if ((jfgShadowAtlas != nullptr) && (jfgShadowTile == tile)) {
             return;
         }
@@ -2640,7 +2662,8 @@ namespace RT64 {
         }
 
         RenderClearValue clearValue = RenderClearValue::Depth(RenderDepth(), RenderFormat::D32_FLOAT);
-        jfgShadowAtlas = worker->device->createTexture(RenderTextureDesc::DepthTarget(tile * 6, tile * JfgShadowRows, RenderFormat::D32_FLOAT, RenderMultisampling(), &clearValue));
+        // Rows of cubes, then the directional light's map (two tiles square) below them.
+        jfgShadowAtlas = worker->device->createTexture(RenderTextureDesc::DepthTarget(tile * 6, tile * (JfgShadowRows + 2), RenderFormat::D32_FLOAT, RenderMultisampling(), &clearValue));
         jfgShadowAtlas->setName("JFG Shadow Maps");
         jfgShadowAtlasView = jfgShadowAtlas->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::D32_FLOAT));
         jfgShadowFramebuffer = worker->device->createFramebuffer(RenderFramebufferDesc(nullptr, 0, jfgShadowAtlas.get()));
@@ -2655,7 +2678,8 @@ namespace RT64 {
             return;
         }
 
-        const bool draw = (jfgShadowPipeline != nullptr) && (rendererPipelineLayout != nullptr) && !jfgShadowLights.empty();
+        const bool sun = float(jfgSunShadow.w) > 0.0f;
+        const bool draw = (jfgShadowPipeline != nullptr) && (rendererPipelineLayout != nullptr) && (!jfgShadowLights.empty() || sun);
         if (!draw) {
             if (!jfgShadowAtlasReadable) {
                 worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(jfgShadowAtlas.get(), RenderTextureLayout::DEPTH_READ));
@@ -2667,7 +2691,7 @@ namespace RT64 {
 
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(jfgShadowAtlas.get(), RenderTextureLayout::DEPTH_WRITE));
         worker->commandList->setFramebuffer(jfgShadowFramebuffer.get());
-        const RenderRect fullRect(0, 0, int32_t(jfgShadowTile * 6), int32_t(jfgShadowTile * JfgShadowRows));
+        const RenderRect fullRect(0, 0, int32_t(jfgShadowTile * 6), int32_t(jfgShadowTile * (JfgShadowRows + 2)));
         worker->commandList->setViewports(RenderViewport(0.0f, 0.0f, float(fullRect.right), float(fullRect.bottom)));
         worker->commandList->setScissors(fullRect);
         worker->commandList->clearDepth();
@@ -2693,6 +2717,20 @@ namespace RT64 {
                 worker->commandList->setGraphicsPushConstants(0, &params);
                 worker->commandList->drawIndexedInstanced(indexCount, 1, 0, 0, 0);
             }
+        }
+
+        if (sun) {
+            interop::RasterParams params = {};
+            const float centre[3] = { float(jfgSunShadow.x), float(jfgSunShadow.y), float(jfgSunShadow.z) };
+            memcpy(&params.padding, centre, sizeof(centre));
+            params.renderIndex = 6; // JFG_SUN_FACE
+            params.screenScale.x = float(jfgSunShadow.w);
+            params.screenScale.y = jfgSunRange;
+            const int32_t y = int32_t(JfgShadowRows * jfgShadowTile), size = int32_t(jfgShadowTile * 2);
+            worker->commandList->setViewports(RenderViewport(0.0f, float(y), float(size), float(size)));
+            worker->commandList->setScissors(RenderRect(0, y, size, y + size));
+            worker->commandList->setGraphicsPushConstants(0, &params);
+            worker->commandList->drawIndexedInstanced(indexCount, 1, 0, 0, 0);
         }
 
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(jfgShadowAtlas.get(), RenderTextureLayout::DEPTH_READ));
