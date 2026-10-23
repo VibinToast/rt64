@@ -5,6 +5,7 @@
 #include "rt64_framebuffer_renderer.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -103,6 +104,24 @@ namespace {
 
     std::mutex jfgMaterialImageMutex;
     std::vector<JfgMaterialImage> jfgMaterialImages;
+
+    // JFG PORT: each emission map's average colour (0-1, black included), for the lights the port places where the
+    // textures are (rt64_jfg_emission_colour).
+    std::mutex jfgEmissionMutex;
+    std::unordered_map<uint64_t, std::array<float, 3>> jfgEmissionColours;
+}
+
+bool rt64_jfg_emission_colour(uint64_t hash, float *rgb) {
+    std::lock_guard<std::mutex> lock(jfgEmissionMutex);
+    const auto it = jfgEmissionColours.find(hash);
+    if (it == jfgEmissionColours.end()) {
+        return false;
+    }
+
+    rgb[0] = it->second[0];
+    rgb[1] = it->second[1];
+    rgb[2] = it->second[2];
+    return true;
 }
 
 // JFG PORT: the lighting settings that go to the shaders each frame (src/jfg/jfg_lighting.cpp), as floats:
@@ -2847,6 +2866,20 @@ namespace RT64 {
                 image.height = uint32_t(height);
                 image.rgba.assign(data, data + size_t(width) * size_t(height) * 4);
                 stbi_image_free(data);
+                if (kind == 2) {
+                    double sum[3] = { 0.0, 0.0, 0.0 };
+                    const size_t pixels = size_t(width) * size_t(height);
+                    for (size_t p = 0; p < pixels; p++) {
+                        for (int c = 0; c < 3; c++) {
+                            sum[c] += image.rgba[p * 4 + c];
+                        }
+                    }
+
+                    const double scale = 1.0 / (255.0 * double(std::max(pixels, size_t(1))));
+                    std::lock_guard<std::mutex> emissionLock(jfgEmissionMutex);
+                    jfgEmissionColours[hash] = { float(sum[0] * scale), float(sum[1] * scale), float(sum[2] * scale) };
+                }
+
                 std::lock_guard<std::mutex> imageLock(jfgMaterialImageMutex);
                 jfgMaterialImages.emplace_back(std::move(image));
             }).detach();
