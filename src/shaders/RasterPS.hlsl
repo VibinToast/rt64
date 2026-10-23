@@ -20,6 +20,8 @@
 StructuredBuffer<JfgLight> jfgLights : register(t69, space0);
 // ... and how the frame's characters and objects are lit, by slot (FramebufferRenderer::setJfgLights).
 StructuredBuffer<JfgObjectLight> jfgObjects : register(t72, space0);
+// ... and what the lighting needs once per frame: camera, directional light, materials, shadow fade.
+StructuredBuffer<JfgFrame> jfgFrame : register(t70, space0);
 // ... and the shadow maps of the nearest lights: a cube each, one atlas row of six faces (JfgShadow.hlsli).
 Texture2D<float> jfgShadowMap : register(t73, space0);
 
@@ -62,7 +64,46 @@ float jfgShadowVisibility(float3 p, float3 n, JfgLight light, float darkness) {
         }
     }
 
-    return 1.0f - darkness * (1.0f - lit / 9.0f);
+    return 1.0f - darkness * jfgFrame[0].shadowFade[row - 1] * (1.0f - lit / 9.0f);
+}
+
+// JFG PORT: the surface direction tilted by the texture's detail: the texture's brightness taken as a height (height =
+// how many world units full white stands out), its change across the screen against how the surface spans the screen
+// (dpdx, dpdy) gives the slope (surface gradient, Mikkelsen, "Bump Mapping Unparametrized Surfaces on the GPU").
+float3 jfgDetailNormal(float3 n, float3 dpdx, float3 dpdy, float2 heightDeriv, float height) {
+    const float3 r1 = cross(dpdy, n);
+    const float3 r2 = cross(n, dpdx);
+    const float det = dot(dpdx, r1);
+    if ((height <= 0.0f) || (abs(det) < 1e-10f)) {
+        return n;
+    }
+
+    const float3 grad = sign(det) * (heightDeriv.x * r1 + heightDeriv.y * r2) * height;
+    return normalize(abs(det) * n - grad);
+}
+
+// JFG PORT: a light's shine (Blinn-Phong) on a surface facing nb, seen from the camera; shine = strength x how shiny
+// the texture is there.
+float3 jfgShine(float3 nb, float3 p, float3 toLight, float3 color, float shine, float sharpness) {
+    if ((shine <= 0.0f) || (dot(nb, toLight) <= 0.0f)) {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    const float3 v = normalize(jfgFrame[0].camera.xyz - p);
+    const float3 h = normalize(toLight + v);
+    return color * shine * pow(saturate(dot(nb, h)), sharpness);
+}
+
+// JFG PORT: the shadow of the frame light at pos (a character's own light direction, from the same torch or lamp).
+float jfgShadowAt(float3 p, float3 n, float3 pos, uint lightCount, float darkness) {
+    for (uint i = 0; i < lightCount; i++) {
+        const JfgLight light = jfgLights[i];
+        if (distance(light.posRadius.xyz, pos) < 4.0f) {
+            return jfgShadowVisibility(p, n, light, darkness);
+        }
+    }
+
+    return 1.0f;
 }
 
 #if defined(MULTISAMPLING)
@@ -188,6 +229,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
 
     float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
     float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    // JFG PORT: the texture's brightness one step along u and along v (the surface detail's slope, see below), sampled
+    // as the texture itself is so it changes smoothly between texels.
+    const bool jfgDetailOn = (jfgFrame[0].material.x > 0.0f) &&
+        (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && (vertexWorldNorm.w > 0.5f)));
+    float2 jfgTexGrad = float2(0.0f, 0.0f);
     if (renderFlagUsesTexture0(rp.flags)) {
         const uint globalTileIndex = instanceRenderIndices[gConstants.renderIndex].rdpTileIndex + tileIndex0;
         RDPTile rdpTile = RDPTiles[globalTileIndex];
@@ -200,6 +246,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
+        if (jfgDetailOn) {
+            const float3 toLum = float3(0.299f, 0.587f, 0.114f);
+            const float lum = dot(texVal0.rgb, toLum);
+            const float4 alongU = sampleTexture(otherMode, rp.flags, textureUV + float2(1.0f, 0.0f), ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
+            const float4 alongV = sampleTexture(otherMode, rp.flags, textureUV + float2(0.0f, 1.0f), ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
+            jfgTexGrad = float2(dot(alongU.rgb, toLum) - lum, dot(alongV.rgb, toLum) - lum);
+        }
     }
     
     if (renderFlagUsesTexture1(rp.flags)) {
@@ -218,6 +271,20 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug);
     }
     
+    // JFG PORT: what the lighting below needs from the texture (outside any branch, for the screen derivatives): its
+    // brightness, taken as a height for the surface detail and as how shiny it is, and the surface's span on screen.
+    const JfgFrame jfgF = jfgFrame[0];
+    const float jfgTexLum = dot(texVal0.rgb, float3(0.299f, 0.587f, 0.114f));
+    // The slope across the screen, from the slope along the texture (chain rule: the texture's own screen derivatives).
+    const float2 jfgLumDeriv = float2(dot(jfgTexGrad, ddxVertexUV), dot(jfgTexGrad, ddyVertexUV));
+    const float3 jfgDpdx = ddx(vertexWorldPos.xyz);
+    const float3 jfgDpdy = ddy(vertexWorldPos.xyz);
+    const float jfgCameraDistance = distance(jfgF.camera.xyz, vertexWorldPos.xyz);
+    const float jfgHeight = jfgF.material.x * saturate(1.5f - jfgCameraDistance / 1500.0f); // fades out with distance
+    const float jfgShineStrength = jfgF.material.y * lerp(0.25f, 1.0f, jfgTexLum);
+    const float jfgSharpness = max(jfgF.material.z, 1.0f);
+    float3 jfgSpecular = float3(0.0f, 0.0f, 0.0f);
+
     // Color combiner.
     float4 shadeColor = vertexColor;
 
@@ -226,25 +293,36 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // multiplies it with the texture: full strength within the inner radius, linear to nothing at the radius.
     // JFG PORT: characters and objects, lit as the game lights them but per pixel with the model's own normals
     // (vertexWorldNorm.w = object slot + 1): base colour (in the vertex colour) x (ambient, scaled with the level's,
-    // + each of the game's directions by how much the surface faces it), then the frame's lights by the object's
-    // share of them.
+    // + each of the game's directions by how much the surface faces it, shadowed by its light's shadow map when that
+    // light has one), the directional light, then the frame's lights by the object's share of them.
     if ((vertexWorldNorm.w > 0.5f) && (vertexWorldPos.w > 0.5f)) {
         const JfgObjectLight object = jfgObjects[uint(vertexWorldNorm.w + 0.5f) - 1];
         const float3 n = normalize(vertexWorldNorm.xyz);
+        const float3 nb = jfgDetailNormal(n, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight * jfgF.extra.x); // their own share
+        const uint lightCount = gConstants.padding.y & 0xFFFF;
+        const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         // The first setting is the level's own light (its ambient and one direction, from the level header), so the
         // level ambient scales both; the others come from nearby lights (torches, lamps) and are left as they are.
         const float levelAmbient = float(gConstants.padding.x >> 24) / 128.0f;
         float3 brightness = object.params.x * levelAmbient;
         for (uint k = 0; k < uint(object.params.y + 0.5f); k++) {
             const float scale = (k == 0) ? levelAmbient : 1.0f;
-            brightness += object.colors[k].rgb * object.dirs[k].w * scale * saturate(dot(n, normalize(object.dirs[k].xyz)));
+            const float3 dir = normalize(object.dirs[k].xyz);
+            const float shadow = (object.positions[k].w > 0.5f) ? jfgShadowAt(vertexWorldPos.xyz, n, object.positions[k].xyz, lightCount, darkness) : 1.0f;
+            const float3 light = object.colors[k].rgb * object.dirs[k].w * scale * shadow;
+            brightness += light * saturate(dot(nb, dir));
+            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, dir, light, jfgShineStrength, jfgSharpness);
+        }
+
+        if (jfgF.sunDir.w > 0.5f) {
+            const float3 sun = jfgF.sunColor.rgb * jfgF.sunColor.w;
+            brightness += sun * saturate(dot(nb, jfgF.sunDir.xyz));
+            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
         }
 
         float3 added = float3(0.0f, 0.0f, 0.0f);
         const float share = object.params.z;
         if (share > 0.0f) {
-            const uint lightCount = gConstants.padding.y & 0xFFFF;
-            const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
             const float facing = saturate(asfloat(gConstants.padding.z));
             for (uint i = 0; i < lightCount; i++) {
                 const JfgLight light = jfgLights[i];
@@ -253,9 +331,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
                 const float d = length(toLight);
                 if (d < radius) {
                     const float inner = min(light.colorInner.w, radius - 1.0f);
-                    const float towards = saturate(dot(n, toLight / max(d, 0.001f)));
+                    const float3 l = toLight / max(d, 0.001f);
+                    const float towards = saturate(dot(nb, l));
                     const float visibility = jfgShadowVisibility(vertexWorldPos.xyz, n, light, darkness);
-                    added += light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * lerp(1.0f, towards, facing) * visibility;
+                    const float3 lit = light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * visibility;
+                    added += lit * lerp(1.0f, towards, facing);
+                    jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, l, lit * share, jfgShineStrength, jfgSharpness);
                 }
             }
         }
@@ -263,14 +344,17 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         shadeColor.rgb = saturate(shadeColor.rgb * (saturate(brightness) + added * share));
     }
 
-    // Facing (padding.z): how much a surface turned away from a light gets less of it, which the game never does.
+    // The level: its own colours are its ambient (and hold its torches' painted glow), the frame's lights and the
+    // directional light are added. Facing (padding.z): how much a surface turned away from a light gets less of it,
+    // which the game never does; the surface detail tilts each light whatever facing is set to.
     if ((gConstants.padding.x & RASTER_JFG_LEVEL) && (vertexWorldPos.w > 0.5f)) {
         const float facing = saturate(asfloat(gConstants.padding.z));
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         const float ambient = float(gConstants.padding.x >> 24) / 128.0f; // the level's own colours are its ambient light
+        const float3 nb = jfgDetailNormal(jfgNormal, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight);
         float3 added = float3(0.0f, 0.0f, 0.0f);
-        float painted = 1.0f; // how much of the level's own colours a shadow leaves
+        float painted = 1.0f; // how much of the level's own colours a shadow (and the detail) leaves
         for (uint i = 0; i < lightCount; i++) {
             const JfgLight light = jfgLights[i];
             const float radius = light.posRadius.w;
@@ -278,14 +362,23 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             const float d = length(toLight);
             if (d < radius) {
                 const float inner = min(light.colorInner.w, radius - 1.0f);
-                const float towards = saturate(dot(jfgNormal, toLight / max(d, 0.001f)));
+                const float3 l = toLight / max(d, 0.001f);
+                const float towards = saturate(dot(jfgNormal, l));
+                const float relief = saturate(1.0f + dot(nb, l) - dot(jfgNormal, l)); // the detail's light and shade
                 const float visibility = jfgShadowVisibility(vertexWorldPos.xyz, jfgNormal, light, darkness);
                 const float reach = saturate((radius - d) / (radius - inner));
-                added += light.colorInner.rgb * reach * lerp(1.0f, towards, facing) * visibility;
+                const float3 lit = light.colorInner.rgb * reach * visibility;
+                added += lit * lerp(1.0f, towards, facing) * relief;
+                jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, l, lit, jfgShineStrength, jfgSharpness);
                 // The level's colours already hold the glow of its torches and lamps, so a shadow from one takes that
-                // too: as much as the light reaches there, up to three quarters of the colour.
-                painted *= 1.0f - 0.75f * reach * (1.0f - visibility);
+                // too (as much as the light reaches there, up to material.w of the colour), and the detail shades it.
+                painted *= (1.0f - jfgF.material.w * reach * (1.0f - visibility)) * lerp(1.0f, relief, reach * 0.5f);
             }
+        }
+
+        if (jfgF.sunDir.w > 0.5f) {
+            added += jfgF.sunColor.rgb * saturate(dot(nb, jfgF.sunDir.xyz));
+            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, jfgF.sunColor.rgb, jfgShineStrength, jfgSharpness);
         }
 
         shadeColor.rgb = saturate(shadeColor.rgb * ambient * painted + added);
@@ -355,6 +448,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     blInputs.fogColor = instanceRDPParams[instanceIndex].fogColor;
     blInputs.shadeAlpha = shadeColor.a;
     resultColor = Blender::run(otherMode, rp.flags, blInputs, combinerColor, false);
+    resultColor.rgb += jfgSpecular; // JFG PORT: shine goes on top of the texture, not into it
     resultAlpha = 1.0f;
     
     // When using alpha blending, we store the blending factor into the dedicated output so the main one can be used for coverage.

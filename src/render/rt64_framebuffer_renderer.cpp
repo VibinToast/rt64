@@ -82,6 +82,17 @@ std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting de
 std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
 std::atomic<int> rt64_jfg_shadow_lights{ 4 };  // how many of the nearest lights get a shadow map, 0-4 (recordJfgShadows)
 std::atomic<int> rt64_jfg_shadow_size{ 512 };  // each shadow map face's size in texels
+
+// JFG PORT: the lighting settings that go to the shaders each frame (src/jfg/jfg_lighting.cpp), as floats:
+//   0-2 direction towards the directional light, 3 on (0/1), 4-6 its colour x intensity, 7 how much it lights
+//   characters, 8 surface detail height, 9 shine strength, 10 shine sharpness, 11 how much a shadow takes from the
+//   level's painted glow, 12 share of the surface detail on characters and objects.
+static std::mutex jfgParamsMutex;
+static float jfgParams[16] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
+void rt64_jfg_lighting_params(const float *params, uint32_t count) {
+    std::lock_guard<std::mutex> lock(jfgParamsMutex);
+    memcpy(jfgParams, params, sizeof(float) * std::min(count, 16U));
+}
 std::atomic<float> rt64_jfg_level_ambient{ 1.0f }; // a scale on the level's own colours, its ambient light (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
 std::atomic<float> rt64_jfg_vignette_size{ 0.45f };
@@ -371,7 +382,7 @@ namespace RT64 {
         // JFG PORT: the world position of every vertex for the raster shaders (RasterVS).
         descCommonSet->setBuffer(descCommonSet->jfgWorldPos, outputBuffers->jfgWorldPosBuffer.buffer.get(), outputBuffers->jfgWorldPosBuffer.allocatedSize);
         descCommonSet->setBuffer(descCommonSet->jfgLights, jfgLightsBuffer.get(), sizeof(interop::JfgLight) * jfgLights.size(), RenderBufferStructuredView(sizeof(interop::JfgLight)));
-        descCommonSet->setBuffer(descCommonSet->jfgCasters, jfgCastersBuffer.get(), sizeof(hlslpp::float4) * jfgCasters.size(), RenderBufferStructuredView(sizeof(hlslpp::float4)));
+        descCommonSet->setBuffer(descCommonSet->jfgFrame, jfgFrameBuffer.get(), sizeof(interop::JfgFrame) * jfgFrameData.size(), RenderBufferStructuredView(sizeof(interop::JfgFrame)));
         descCommonSet->setBuffer(descCommonSet->jfgWorldNorm, outputBuffers->jfgWorldNormBuffer.buffer.get(), outputBuffers->jfgWorldNormBuffer.allocatedSize);
         descCommonSet->setBuffer(descCommonSet->jfgObjects, jfgObjectsBuffer.get(), sizeof(interop::JfgObjectLight) * jfgObjects.size(), RenderBufferStructuredView(sizeof(interop::JfgObjectLight)));
         if (jfgShadowAtlas != nullptr) {
@@ -1132,7 +1143,7 @@ namespace RT64 {
                     (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | (triangles.jfgLevel ? RASTER_JFG_LEVEL : 0) |
                     (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0) |
                     (jfgDebugShadow ? RASTER_JFG_DEBUG_SHADOW : 0) | (jfgShadows << 16) | (jfgAmbient << 24); // JFG PORT: see RasterVS, RasterPS
-                rasterParams.padding.y = (jfgPixelLights ? jfgLightCount : 0) | (jfgCasterCount << 16);
+                rasterParams.padding.y = jfgPixelLights ? jfgLightCount : 0;
                 memcpy(&rasterParams.padding.z, &jfgFacing, sizeof(float));
                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
 
@@ -2442,7 +2453,7 @@ namespace RT64 {
         jfgShadowCandidates.clear();
     }
 
-    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, const std::vector<interop::PointLight> &casters,
+    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, const std::vector<interop::PointLight> &points,
         const std::vector<interop::JfgObjectLight> &objects, float curFrameWeight)
     {
         jfgObjects = objects;
@@ -2454,7 +2465,7 @@ namespace RT64 {
         // falloff from the inner radius (pointRadius) to the radius (attenuationRadius). On in-between frames a light is
         // placed back along how far it moved since the game frame before (direction, see rt64_jfg_frame_lights), as
         // RSPProcessCS does with vertices.
-        const size_t MaxLights = 32;
+        const size_t MaxLights = 64;
         jfgLights.clear();
         for (size_t i = 0; (i < lights.size()) && (i < MaxLights); i++) {
             const interop::PointLight &l = lights[i];
@@ -2466,51 +2477,88 @@ namespace RT64 {
             jfgLights.emplace_back(dst);
         }
 
-        // Shadow maps for the nearest few (sent first), thrown from above the light (JFG_SHADOW_LIFT, JfgShadow.hlsli)
-        // out to the farthest point it lights.
+        // The camera ([0] of the frame's points), placed on in-between frames as the lights are.
+        const float back = 1.0f - curFrameWeight;
+        hlslpp::float3 camera = { 0.0f, 0.0f, 0.0f };
+        if (!points.empty()) {
+            const interop::PointLight &c = points[0];
+            camera = { float(c.position.x - c.direction.x * back), float(c.position.y - c.direction.y * back), float(c.position.z - c.direction.z * back) };
+        }
+
+        // Shadow maps for the nearest few (sent nearest first), thrown from above the light (JFG_SHADOW_LIFT,
+        // JfgShadow.hlsli) out to the farthest point it lights. So that a light's shadows don't pop when another one
+        // takes its map, each fades out as it gets as far as the next light in line (and the new one fades in).
         const float ShadowLift = 40.0f;
         const size_t shadowed = (rt64_jfg_shadows.load(std::memory_order_relaxed) > 0.0f) ?
             size_t(std::clamp(rt64_jfg_shadow_lights.load(std::memory_order_relaxed), 0, int(JfgShadowRows))) : 0;
+        auto distanceToCamera = [&](const interop::JfgLight &light) {
+            const float dx = float(light.posRadius.x) - float(camera.x);
+            const float dy = float(light.posRadius.y) - float(camera.y);
+            const float dz = float(light.posRadius.z) - float(camera.z);
+            return sqrtf(dx * dx + dy * dy + dz * dz);
+        };
+
         jfgShadowLights.clear();
+        float shadowDistance[JfgShadowRows] = {};
+        float nextDistance = -1.0f;
         for (interop::JfgLight &light : jfgLights) {
-            if ((jfgShadowLights.size() < shadowed) && (float(light.posRadius.w) > 1.0f)) {
+            light.shadow = { 0.0f, 0.0f, 0.0f, 0.0f };
+            if (float(light.posRadius.w) <= 1.0f) {
+                continue;
+            }
+
+            if (jfgShadowLights.size() < shadowed) {
                 const float farPlane = float(light.posRadius.w) + ShadowLift + 8.0f;
+                shadowDistance[jfgShadowLights.size()] = distanceToCamera(light);
                 light.shadow = { float(jfgShadowLights.size() + 1), 1.0f, farPlane, 0.0f };
                 jfgShadowLights.emplace_back(float(light.posRadius.x), float(light.posRadius.y) + ShadowLift, float(light.posRadius.z), farPlane);
             }
-            else {
-                light.shadow = { 0.0f, 0.0f, 0.0f, 0.0f };
+            else if (nextDistance < 0.0f) {
+                nextDistance = distanceToCamera(light);
             }
         }
+
+        float params[16];
+        {
+            std::lock_guard<std::mutex> lock(jfgParamsMutex);
+            memcpy(params, jfgParams, sizeof(params));
+        }
+
+        interop::JfgFrame frame = {};
+        frame.camera = { float(camera.x), float(camera.y), float(camera.z), 0.0f };
+        hlslpp::float3 sunDir = { params[0], params[1], params[2] };
+        const float sunLength = sqrtf(params[0] * params[0] + params[1] * params[1] + params[2] * params[2]);
+        sunDir = (sunLength > 1e-4f) ? (sunDir / sunLength) : hlslpp::float3(0.0f, 1.0f, 0.0f);
+        frame.sunDir = { float(sunDir.x), float(sunDir.y), float(sunDir.z), (params[3] > 0.5f) ? 1.0f : 0.0f };
+        frame.sunColor = { params[4], params[5], params[6], params[7] };
+        frame.material = { params[8], params[9], params[10], params[11] };
+        float fade[JfgShadowRows];
+        for (uint32_t r = 0; r < JfgShadowRows; r++) {
+            const float transition = std::max(nextDistance * 0.2f, 40.0f);
+            fade[r] = (nextDistance < 0.0f) ? 1.0f : std::clamp((nextDistance - shadowDistance[r]) / transition, 0.0f, 1.0f);
+        }
+
+        frame.shadowFade = { fade[0], fade[1], fade[2], fade[3] };
+        frame.extra = { params[12], 0.0f, 0.0f, 0.0f };
+        jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
         if (jfgLights.empty()) {
             jfgLights.emplace_back(); // the upload needs one
         }
-
-        // The shadow casters, placed on in-between frames as the lights are.
-        const size_t MaxCasters = 64;
-        jfgCasters.clear();
-        for (size_t i = 0; (i < casters.size()) && (i < MaxCasters); i++) {
-            const interop::PointLight &c = casters[i];
-            const float back = 1.0f - curFrameWeight;
-            jfgCasters.emplace_back(c.position.x - c.direction.x * back, c.position.y - c.direction.y * back, c.position.z - c.direction.z * back,
-                c.pointRadius);
-        }
-
-        jfgCasterCount = uint32_t(jfgCasters.size());
-        if (jfgCasters.empty()) {
-            jfgCasters.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);
-        }
     }
 
     void FramebufferRenderer::endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled) {
+        if (jfgFrameData.empty()) {
+            jfgFrameData.emplace_back(interop::JfgFrame{}); // JFG PORT: the upload needs one
+        }
+
         bool shaderViewRtEnabled = false;
         std::vector<BufferUploader::Upload> shaderUploads = {
             { renderIndicesVector.data(), { 0, renderIndicesVector.size() }, sizeof(interop::RenderIndices), RenderBufferFlag::STORAGE, { }, &renderIndicesBuffer},
             { &frameParams, { 0, 1 }, sizeof(interop::FrameParams), RenderBufferFlag::CONSTANT, { }, &frameParamsBuffer},
             { jfgLights.data(), { 0, jfgLights.size() }, sizeof(interop::JfgLight), RenderBufferFlag::STORAGE, { }, &jfgLightsBuffer }, // JFG PORT
-            { jfgCasters.data(), { 0, jfgCasters.size() }, sizeof(hlslpp::float4), RenderBufferFlag::STORAGE, { }, &jfgCastersBuffer },
+            { jfgFrameData.data(), { 0, jfgFrameData.size() }, sizeof(interop::JfgFrame), RenderBufferFlag::STORAGE, { }, &jfgFrameBuffer },
             { jfgObjects.data(), { 0, jfgObjects.size() }, sizeof(interop::JfgObjectLight), RenderBufferFlag::STORAGE, { }, &jfgObjectsBuffer }
         };
 

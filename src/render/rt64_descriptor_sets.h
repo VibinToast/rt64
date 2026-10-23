@@ -153,7 +153,7 @@ namespace RT64 {
         uint32_t DynamicRenderParams;
         uint32_t jfgWorldPos; // JFG PORT: see below
         uint32_t jfgLights;
-        uint32_t jfgCasters;
+        uint32_t jfgFrame;
         uint32_t jfgWorldNorm;
         uint32_t jfgObjects;
         uint32_t jfgShadowMap;
@@ -234,7 +234,7 @@ namespace RT64 {
             // away from where the shaders read it (posBuffer at 27 read zeros). Binding 68 keeps it unique for Vulkan.
             jfgWorldPos = builder.addByteAddressBuffer(68);
             jfgLights = builder.addStructuredBuffer(69); // the frame's lights (RasterPS)
-            jfgCasters = builder.addStructuredBuffer(70); // the frame's shadow casters (RasterPS)
+            jfgFrame = builder.addStructuredBuffer(70); // what the lighting needs once per frame (RasterPS)
             jfgWorldNorm = builder.addByteAddressBuffer(71); // characters' normals in the world (RasterVS)
             jfgObjects = builder.addStructuredBuffer(72); // how the frame's characters are lit (RasterPS)
             jfgShadowMap = builder.addTexture(73); // the lights' shadow cubes, one atlas (RasterPS, JfgShadow.hlsli)

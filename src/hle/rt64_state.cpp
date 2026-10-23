@@ -49,7 +49,7 @@ namespace {
     struct JfgLightFrame {
         uint32_t dlStart = 0;
         std::vector<interop::PointLight> lights;
-        std::vector<interop::PointLight> casters; // shadow casters: position, pointRadius = radius, direction = move
+        std::vector<interop::PointLight> points; // [0] the camera: position, direction = move (rt64_jfg_frame_points)
         std::vector<uint32_t> objectRanges, objectNormals; // see State::jfgObjectRanges
         std::vector<interop::JfgObjectLight> objectLights;
     };
@@ -89,7 +89,7 @@ static JfgLightFrame &jfgLightFrameFor(uint32_t dlStart) {
     jfgLightFrameNext = (jfgLightFrameNext + 1) % std::size(jfgLightFrames);
     frame.dlStart = dlStart;
     frame.lights.clear();
-    frame.casters.clear();
+    frame.points.clear();
     frame.objectRanges.clear();
     frame.objectNormals.clear();
     frame.objectLights.clear();
@@ -136,34 +136,34 @@ void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) 
     std::swap(previous, current);
 }
 
-// JFG PORT: the frame's shadow casters (characters and objects with a shadow, src/jfg/jfg_lighting.cpp), sent after its
-// lights: 5 floats each, x, y, z of a sphere's centre (game world), its radius, and an id (uint bits, the object).
-void rt64_jfg_frame_casters(uint32_t dlStart, const float *data, uint32_t count) {
+// JFG PORT: points the lighting needs, placed on in-between frames as the lights are (src/jfg/jfg_lighting.cpp), sent
+// after the lights: 5 floats each, x, y, z (game world), a size, and an id (uint bits). [0] is the camera.
+void rt64_jfg_frame_points(uint32_t dlStart, const float *data, uint32_t count) {
     std::lock_guard<std::mutex> lock(jfgLightMutex);
     JfgLightFrame *frame = &jfgLightFrameFor(dlStart);
     static std::unordered_map<uint32_t, hlslpp::float3> previous, current;
     current.clear();
-    frame->casters.clear();
+    frame->points.clear();
     for (uint32_t i = 0; i < count; i++) {
         const float *c = &data[i * 5];
         uint32_t id;
         memcpy(&id, &c[4], sizeof(id));
-        interop::PointLight caster = {};
-        caster.position = { c[0], c[1], c[2] };
-        caster.pointRadius = c[3];
-        jfgTrackMoves(previous, current, id, caster);
-        frame->casters.emplace_back(caster);
+        interop::PointLight point = {};
+        point.position = { c[0], c[1], c[2] };
+        point.pointRadius = c[3];
+        jfgTrackMoves(previous, current, id, point);
+        frame->points.emplace_back(point);
     }
 
     std::swap(previous, current);
 }
 
-static bool jfgTakeFrameLights(uint32_t dlStart, std::vector<interop::PointLight> &dst, std::vector<interop::PointLight> &casters) {
+static bool jfgTakeFrameLights(uint32_t dlStart, std::vector<interop::PointLight> &dst, std::vector<interop::PointLight> &points) {
     std::lock_guard<std::mutex> lock(jfgLightMutex);
     for (JfgLightFrame &f : jfgLightFrames) {
         if (f.dlStart == dlStart) {
             dst.insert(dst.end(), f.lights.begin(), f.lights.end());
-            casters = f.casters;
+            points = f.points;
             f.dlStart = 0;
             return true;
         }
@@ -1941,7 +1941,7 @@ namespace RT64 {
                 }
 
                 // Record all setup previous to drawing any of the recorded framebuffers.
-                framebufferRenderer->setJfgLights(workload.pointLights, workload.jfgCasters, workload.jfgObjects, 1.0f); // JFG PORT
+                framebufferRenderer->setJfgLights(workload.pointLights, workload.jfgPoints, workload.jfgObjects, 1.0f); // JFG PORT
                 framebufferRenderer->endFramebuffers(ext.framebufferGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, false);
                 framebufferRenderer->recordSetup(ext.framebufferGraphicsWorker, bufferUploaders, queuedProcessor, nullptr, &workload.outputBuffers, false);
 
@@ -2217,7 +2217,7 @@ namespace RT64 {
 
             jfgObjectLoads = jfgObjectHits = 0;
         }
-        if (jfgTakeFrameLights(jfgDlStart, workload.pointLights, workload.jfgCasters)) {
+        if (jfgTakeFrameLights(jfgDlStart, workload.pointLights, workload.jfgPoints)) {
             static const bool log = std::getenv("RT64_JFG_DEBUG_LIGHTS") != nullptr;
             static uint32_t frames = 0, logged = 0;
             if (log && !workload.pointLights.empty() && (logged < 200) && ((frames++ % 30) == 0)) {
