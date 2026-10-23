@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "common/rt64_emulator_configuration.h"
+#include "common/rt64_filesystem.h" // JFG PORT: material maps in texture packs
 #include "common/rt64_user_configuration.h"
 #include "hle/rt64_framebuffer_manager.h"
 #include "hle/rt64_workload.h"
@@ -125,12 +126,19 @@ namespace RT64 {
         std::vector<std::unique_ptr<RenderTexture>> jfgShadowRetired;
         std::vector<std::unique_ptr<RenderTextureView>> jfgShadowRetiredViews;
         std::vector<std::unique_ptr<RenderFramebuffer>> jfgShadowRetiredFramebuffers;
-        // JFG PORT: authored material maps (materials/<hash>_n.png, _s.png next to the game): the files found, the
-        // slots of the ones loaded (by texture hash), their textures and upload buffers by slot, and the slots still
-        // to be put in the texture descriptor set.
+        // JFG PORT: authored material maps (<hash>_n.png, _s.png, in materials/ next to the game or in the texture
+        // packs): the files found (path, and the pack's file system index or -1 for the folder), the slots of the ones
+        // loaded (by texture hash), their textures and upload buffers by slot, and the slots still to be put in the
+        // texture descriptor set. Scanned again when the packs change (jfgMaterialPacks: their file systems).
+        struct JfgMaterialFile {
+            std::string path[2];
+            int fileSystem[2] = { -1, -1 };
+        };
+
         std::mutex jfgMaterialMutex;
         bool jfgMaterialsScanned = false;
-        std::unordered_map<uint64_t, std::pair<std::string, std::string>> jfgMaterialFiles;
+        std::vector<const FileSystem *> jfgMaterialPacks;
+        std::unordered_map<uint64_t, JfgMaterialFile> jfgMaterialFiles;
         std::unordered_map<uint64_t, uint32_t> jfgMaterialSlots;
         std::unordered_set<uint64_t> jfgMaterialRequested;
         std::vector<std::unique_ptr<Texture>> jfgMaterialTextures;
@@ -176,7 +184,8 @@ namespace RT64 {
         RenderPipeline *bloomCompositePipeline = nullptr;
         BloomBuffers *getBloomBuffers(RenderWorker *worker, uint32_t width, uint32_t height, bool ssao = false);
         void updateJfgShadowAtlas(RenderWorker *worker); // JFG PORT
-        uint32_t jfgMaterialFor(uint64_t hash); // JFG PORT: a texture's material map slots for its GPU tile
+        uint32_t jfgMaterialFor(uint64_t hash, TextureCache *textureCache); // JFG PORT: a texture's material map slots for its GPU tile
+        void scanJfgMaterials(const TextureCache *textureCache); // JFG PORT
         void uploadJfgMaterials(RenderWorker *worker); // JFG PORT
         void recordJfgShadows(RenderWorker *worker); // JFG PORT
         RenderDescriptorSet *makeBloomDescriptorSet(RenderWorker *worker, RenderTexture *texture, RenderTextureView *textureView);

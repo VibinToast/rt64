@@ -298,6 +298,7 @@ namespace RT64 {
         textureCacheSize = static_cast<uint32_t>(textureCacheTextures.size());
         textureCacheGlobalVersion = textureCache->textureMap.globalVersion;
         textureCacheReplacementMapEnabled = textureCache->textureMap.replacementMapEnabled;
+        scanJfgMaterials(textureCache); // JFG PORT: first time, and when the packs change
         dynamicTextureViewVector.clear();
         dynamicTextureBarrierVector.clear();
     }
@@ -354,7 +355,7 @@ namespace RT64 {
                 gpuTile.flags.hasMipmaps = hasMipmaps;
                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
                 gpuTile.flags.jfgSoft = false; // JFG PORT
-                gpuTile.jfgMaterial = jfgMaterialFor(callTile.tmemHashOrID);
+                gpuTile.jfgMaterial = jfgMaterialFor(callTile.tmemHashOrID, textureCache);
             }
         }
     }
@@ -2695,66 +2696,129 @@ namespace RT64 {
         updateShaderViews(worker, drawBuffers, outputBuffers, shaderViewRtEnabled);
     }
 
-    // JFG PORT: the material maps of a texture (by its hash), as GPUTile::jfgMaterial. The first time, the materials
-    // folder next to the game is listed: <16 hex digits of the hash>_n.png (normal map, tangent space with green up)
-    // and _s.png (specular: red = how strong the shine, green = how sharp). A texture's maps are loaded the first
-    // time it is drawn, by a thread of their own; until they are uploaded the tile has none.
-    uint32_t FramebufferRenderer::jfgMaterialFor(uint64_t hash) {
+    // JFG PORT: the material maps of a texture (by its hash), as GPUTile::jfgMaterial: <16 hex digits of the hash>_n.png
+    // (normal map, tangent space with green up) and _s.png (specular: red = how strong the shine, green = how sharp),
+    // in the materials folder next to the game or anywhere in a texture pack (scanJfgMaterials). A texture's maps are
+    // loaded the first time it is drawn (a pack's file is read here, under the texture cache's lock, then decoded on a
+    // thread of its own); until they are uploaded the tile has none.
+    static bool jfgMaterialName(const std::string &path, uint64_t &hash, int &kind) {
+        const size_t slash = path.find_last_of("/\\");
+        const std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        if ((name.size() != 22) || (name[16] != '_')) {
+            return false;
+        }
+
+        std::string ext = name.substr(18);
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(tolower(c)); });
+        const char k = char(tolower((unsigned char)(name[17])));
+        if ((ext != ".png") || ((k != 'n') && (k != 's'))) {
+            return false;
+        }
+
+        char *parseEnd = nullptr;
+        const std::string hex = name.substr(0, 16);
+        hash = strtoull(hex.c_str(), &parseEnd, 16);
+        if ((parseEnd == nullptr) || (*parseEnd != '\0')) {
+            return false;
+        }
+
+        kind = (k == 'n') ? 0 : 1;
+        return true;
+    }
+
+    void FramebufferRenderer::scanJfgMaterials(const TextureCache *textureCache) {
+        // The texture cache's map lock is held (updateTextureCache).
+        const auto &packs = textureCache->textureMap.replacementMap.fileSystems;
+        std::vector<const FileSystem *> current;
+        for (const auto &fs : packs) {
+            current.push_back(fs.get());
+        }
+
         std::lock_guard<std::mutex> lock(jfgMaterialMutex);
-        if (!jfgMaterialsScanned) {
-            jfgMaterialsScanned = true;
-            std::error_code ec;
-            const char *dir = std::getenv("RT64_JFG_MATERIALS");
-            const std::filesystem::path folder = (dir != nullptr) ? std::filesystem::path(dir) : std::filesystem::path("materials");
-            for (std::filesystem::directory_iterator it(folder, ec), end; !ec && (it != end); it.increment(ec)) {
-                const std::string name = it->path().filename().string();
-                if ((name.size() != 22) || (name[16] != '_') || (name.substr(18) != ".png")) {
-                    continue;
-                }
+        if (jfgMaterialsScanned && (current == jfgMaterialPacks)) {
+            return;
+        }
 
-                char *parseEnd = nullptr;
-                const uint64_t fileHash = strtoull(name.substr(0, 16).c_str(), &parseEnd, 16);
-                if ((parseEnd == nullptr) || (*parseEnd != '\0')) {
-                    continue;
-                }
-
-                if ((name[17] == 'n') || (name[17] == 'N')) {
-                    jfgMaterialFiles[fileHash].first = it->path().string();
-                }
-                else if ((name[17] == 's') || (name[17] == 'S')) {
-                    jfgMaterialFiles[fileHash].second = it->path().string();
-                }
-            }
-
-            rt64_jfg_material_files = int(jfgMaterialFiles.size());
-            if (!jfgMaterialFiles.empty()) {
-                fprintf(stderr, "[RT64 JFG] %zu textures have material maps in %s\n", jfgMaterialFiles.size(), folder.string().c_str());
+        jfgMaterialsScanned = true;
+        jfgMaterialPacks = current;
+        jfgMaterialFiles.clear();
+        jfgMaterialSlots.clear(); // loaded maps keep their slots (the descriptor set may still use them); new ones load again
+        jfgMaterialRequested.clear();
+        uint64_t hash = 0;
+        int kind = 0;
+        std::error_code ec;
+        const char *dir = std::getenv("RT64_JFG_MATERIALS");
+        const std::filesystem::path folder = (dir != nullptr) ? std::filesystem::path(dir) : std::filesystem::path("materials");
+        for (std::filesystem::directory_iterator it(folder, ec), end; !ec && (it != end); it.increment(ec)) {
+            if (jfgMaterialName(it->path().filename().string(), hash, kind)) {
+                jfgMaterialFiles[hash].path[kind] = it->path().string();
+                jfgMaterialFiles[hash].fileSystem[kind] = -1;
             }
         }
 
-        if (jfgMaterialFiles.empty()) {
-            return 0;
+        for (size_t i = 0; i < packs.size(); i++) {
+            for (FileSystem::Iterator it = packs[i]->begin(); it != packs[i]->end(); ++it) {
+                const std::string &path = *it;
+                if (jfgMaterialName(path, hash, kind) && jfgMaterialFiles[hash].path[kind].empty()) {
+                    jfgMaterialFiles[hash].path[kind] = path;
+                    jfgMaterialFiles[hash].fileSystem[kind] = int(i);
+                }
+            }
         }
 
-        const auto slots = jfgMaterialSlots.find(hash);
-        if (slots != jfgMaterialSlots.end()) {
-            return slots->second;
+        rt64_jfg_material_files = int(jfgMaterialFiles.size());
+        if (!jfgMaterialFiles.empty()) {
+            fprintf(stderr, "[RT64 JFG] %zu textures have material maps (%s and %zu texture packs)\n", jfgMaterialFiles.size(), folder.string().c_str(), packs.size());
         }
+    }
 
-        const auto files = jfgMaterialFiles.find(hash);
-        if ((files == jfgMaterialFiles.end()) || !jfgMaterialRequested.insert(hash).second) {
-            return 0;
+    uint32_t FramebufferRenderer::jfgMaterialFor(uint64_t hash, TextureCache *textureCache) {
+        JfgMaterialFile file;
+        {
+            std::lock_guard<std::mutex> lock(jfgMaterialMutex);
+            if (jfgMaterialFiles.empty()) {
+                return 0;
+            }
+
+            const auto slots = jfgMaterialSlots.find(hash);
+            if (slots != jfgMaterialSlots.end()) {
+                return slots->second;
+            }
+
+            const auto files = jfgMaterialFiles.find(hash);
+            if ((files == jfgMaterialFiles.end()) || !jfgMaterialRequested.insert(hash).second) {
+                return 0;
+            }
+
+            file = files->second;
         }
 
         for (int kind = 0; kind < 2; kind++) {
-            const std::string path = (kind == 0) ? files->second.first : files->second.second;
-            if (path.empty()) {
+            if (file.path[kind].empty()) {
                 continue;
             }
 
-            std::thread([hash, kind, path]() {
-                std::ifstream file(std::filesystem::path(path), std::ios::binary);
-                const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            // A pack's file is read now, while the pack can't go away; the folder's on the decoding thread.
+            std::vector<uint8_t> bytes;
+            if ((file.fileSystem[kind] >= 0) && (textureCache != nullptr)) {
+                const std::unique_lock<std::mutex> mapLock(textureCache->textureMapMutex);
+                const auto &packs = textureCache->textureMap.replacementMap.fileSystems;
+                if (size_t(file.fileSystem[kind]) < packs.size()) {
+                    packs[file.fileSystem[kind]]->load(file.path[kind], bytes);
+                }
+
+                if (bytes.empty()) {
+                    continue;
+                }
+            }
+
+            const std::string path = file.path[kind];
+            std::thread([hash, kind, path, bytes = std::move(bytes)]() mutable {
+                if (bytes.empty()) {
+                    std::ifstream stream(std::filesystem::path(path), std::ios::binary);
+                    bytes.assign((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+                }
+
                 int width = 0, height = 0;
                 stbi_uc *data = bytes.empty() ? nullptr : stbi_load_from_memory(bytes.data(), int(bytes.size()), &width, &height, nullptr, 4);
                 if (data == nullptr) {
