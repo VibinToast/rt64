@@ -131,8 +131,8 @@ namespace RT64 {
         // loaded (by texture hash), their textures and upload buffers by slot, and the slots still to be put in the
         // texture descriptor set. Scanned again when the packs change (jfgMaterialPacks: their file systems).
         struct JfgMaterialFile {
-            std::string path[2];
-            int fileSystem[2] = { -1, -1 };
+            std::string path[3];                // _n, _s, _e
+            int fileSystem[3] = { -1, -1, -1 };
         };
 
         std::mutex jfgMaterialMutex;

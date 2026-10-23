@@ -334,6 +334,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     bool jfgHasNormalMap = false;
     bool jfgHasSpecularMap = false;
     float jfgGlow = 0.0f; // how much the texture glows: marked in the lighting tool, or its specular map's blue
+    float3 jfgEmission = float3(0.0f, 0.0f, 0.0f); // the light it gives off: its emission map
     const bool jfgDetailOn = (jfgFrame[0].material.x > 0.0f) &&
         (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && jfgCharacter));
     float2 jfgTexGrad = float2(0.0f, 0.0f);
@@ -351,8 +352,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
         jfgGlow = gpuTileFlagJfgGlow(gpuTile.flags);
         if ((gpuTile.jfgMaterial != 0) && (jfgFrame[0].extra.z > 0.0f)) {
-            const uint normalSlot = gpuTile.jfgMaterial & 0xFFFF;
-            const uint specularSlot = gpuTile.jfgMaterial >> 16;
+            const uint normalSlot = gpuTile.jfgMaterial & 0x3FF;
+            const uint specularSlot = (gpuTile.jfgMaterial >> 10) & 0x3FF;
+            const uint emissionSlot = (gpuTile.jfgMaterial >> 20) & 0x3FF;
+            if (emissionSlot != 0) {
+                jfgEmission = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + emissionSlot - 1).rgb;
+            }
+
             if (normalSlot != 0) {
                 jfgNormalMap = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + normalSlot - 1);
                 jfgHasNormalMap = true;
@@ -585,6 +591,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     blInputs.shadeAlpha = shadeColor.a;
     resultColor = Blender::run(otherMode, rp.flags, blInputs, combinerColor, false);
     resultColor.rgb += jfgSpecular; // JFG PORT: shine goes on top of the texture, not into it
+    resultColor.rgb += jfgEmission * jfgFrame[0].characters.z; // JFG PORT: ... and so does an emission map's light
     resultAlpha = 1.0f;
     
     // When using alpha blending, we store the blending factor into the dedicated output so the main one can be used for coverage.

@@ -69,6 +69,23 @@ void rt64_jfg_glow_note(uint64_t hash, uint32_t address) {
     jfgGlowAddresses[hash] = address & JfgGlowAddressMask;
 }
 
+// The hashes of the textures loaded from [start, end) (noted while any glow ranges are set), for naming their maps.
+uint32_t rt64_jfg_glow_hashes(uint32_t start, uint32_t end, uint64_t *hashes, uint32_t maxHashes) {
+    std::lock_guard<std::mutex> lock(jfgGlowMutex);
+    uint32_t count = 0;
+    for (const auto &it : jfgGlowAddresses) {
+        if ((it.second >= (start & JfgGlowAddressMask)) && (it.second < (end & JfgGlowAddressMask))) {
+            if (count < maxHashes) {
+                hashes[count] = it.first;
+            }
+
+            count++;
+        }
+    }
+
+    return count;
+}
+
 // A texture's glow (0-255) by its hash.
 uint32_t rt64_jfg_glow_for(uint64_t hash) {
     if (!jfgGlowAny.load(std::memory_order_relaxed)) {

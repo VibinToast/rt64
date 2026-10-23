@@ -6,8 +6,9 @@
 
 #include "shared/rt64_hlsl.h"
 
-// JFG PORT: authored material maps (normal, specular) live at the top of the texture array, from this index on
-// (FramebufferRenderer::jfgMaterialFor); GPUTile::jfgMaterial = normal slot + 1 | (specular slot + 1) << 16.
+// JFG PORT: authored material maps (normal, specular, emission) live at the top of the texture array, from this index
+// on (FramebufferRenderer::jfgMaterialFor); GPUTile::jfgMaterial = normal slot + 1 | (specular slot + 1) << 10 |
+// (emission slot + 1) << 20 (0 = none).
 #define JFG_MATERIAL_BASE 7680
 #define JFG_MATERIAL_SLOTS 512
 

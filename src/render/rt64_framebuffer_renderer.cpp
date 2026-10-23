@@ -96,7 +96,7 @@ std::atomic<int> rt64_jfg_material_loaded{ 0 }; // ... and loaded so far
 namespace {
     struct JfgMaterialImage {
         uint64_t hash = 0;
-        bool specular = false;
+        int kind = 0; // 0 normal, 1 specular, 2 emission
         std::vector<uint8_t> rgba;
         uint32_t width = 0, height = 0;
     };
@@ -2704,8 +2704,9 @@ namespace RT64 {
     }
 
     // JFG PORT: the material maps of a texture (by its hash), as GPUTile::jfgMaterial: <16 hex digits of the hash>_n.png
-    // (normal map, tangent space with green up) and _s.png (specular: red = how strong the shine, green = how sharp,
-    // blue = how much it glows),
+    // (normal map, tangent space with green up), _s.png (specular: red = how strong the shine, green = how sharp,
+    // blue = how much the texture glows in its own colour) and _e.png (emission: the light the surface gives off, added
+    // on top, black = none),
     // in the materials folder next to the game or anywhere in a texture pack (scanJfgMaterials). A texture's maps are
     // loaded the first time it is drawn (a pack's file is read here, under the texture cache's lock, then decoded on a
     // thread of its own); until they are uploaded the tile has none.
@@ -2719,7 +2720,7 @@ namespace RT64 {
         std::string ext = name.substr(18);
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(tolower(c)); });
         const char k = char(tolower((unsigned char)(name[17])));
-        if ((ext != ".png") || ((k != 'n') && (k != 's'))) {
+        if ((ext != ".png") || ((k != 'n') && (k != 's') && (k != 'e'))) {
             return false;
         }
 
@@ -2730,7 +2731,7 @@ namespace RT64 {
             return false;
         }
 
-        kind = (k == 'n') ? 0 : 1;
+        kind = (k == 'n') ? 0 : ((k == 's') ? 1 : 2);
         return true;
     }
 
@@ -2793,6 +2794,11 @@ namespace RT64 {
                 return slots->second;
             }
 
+            static std::unordered_set<uint64_t> logged;
+            if ((getenv("RT64_JFG_MATERIAL_LOG") != nullptr) && logged.insert(hash).second) {
+                fprintf(stderr, "[RT64 JFG] drawn %016llX\n", (unsigned long long)hash);
+            }
+
             const auto files = jfgMaterialFiles.find(hash);
             if ((files == jfgMaterialFiles.end()) || !jfgMaterialRequested.insert(hash).second) {
                 return 0;
@@ -2801,7 +2807,7 @@ namespace RT64 {
             file = files->second;
         }
 
-        for (int kind = 0; kind < 2; kind++) {
+        for (int kind = 0; kind < 3; kind++) {
             if (file.path[kind].empty()) {
                 continue;
             }
@@ -2836,7 +2842,7 @@ namespace RT64 {
 
                 JfgMaterialImage image;
                 image.hash = hash;
-                image.specular = (kind == 1);
+                image.kind = kind;
                 image.width = uint32_t(width);
                 image.height = uint32_t(height);
                 image.rgba.assign(data, data + size_t(width) * size_t(height) * 4);
@@ -2879,7 +2885,10 @@ namespace RT64 {
             jfgMaterialUploads.emplace_back(std::move(upload));
             jfgMaterialPending.push_back(slot);
             uint32_t &packed = jfgMaterialSlots[image.hash];
-            packed |= image.specular ? ((slot + 1) << 16) : (slot + 1);
+            packed |= (slot + 1) << (10 * image.kind);
+            if (getenv("RT64_JFG_MATERIAL_LOG") != nullptr) {
+                fprintf(stderr, "[RT64 JFG] material map %016llX kind %d in slot %u\n", (unsigned long long)image.hash, image.kind, slot);
+            }
         }
 
         rt64_jfg_material_loaded = int(jfgMaterialTextures.size());
