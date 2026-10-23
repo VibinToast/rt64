@@ -42,8 +42,8 @@ namespace interop {
                             // light's shadow map depth half range, z = how much authored material maps count (0 = off),
                             // w = the level's smooth surface directions on (0/1)
         float4 sunShadow;   // xyz = centre of the directional light's shadow map, w = its half size (0 = none)
-        float4 characters;  // x = shine strength on characters and objects, y = its sharpness, z = how much glowing
-                            // textures glow (0 = off)
+        float4 characters;  // x = shine strength on characters and objects, y = its sharpness, z = how bright
+                            // emission maps shine (0 = off)
     };
 #ifdef HLSL_CPU
 };

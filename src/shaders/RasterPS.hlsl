@@ -333,7 +333,6 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     float4 jfgSpecularMap = float4(0.0f, 0.0f, 0.0f, 0.0f);
     bool jfgHasNormalMap = false;
     bool jfgHasSpecularMap = false;
-    float jfgGlow = 0.0f; // how much the texture glows: marked in the lighting tool, or its specular map's blue
     float3 jfgEmission = float3(0.0f, 0.0f, 0.0f); // the light it gives off: its emission map
     const bool jfgDetailOn = (jfgFrame[0].material.x > 0.0f) &&
         (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && jfgCharacter));
@@ -350,7 +349,6 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
-        jfgGlow = gpuTileFlagJfgGlow(gpuTile.flags);
         if ((gpuTile.jfgMaterial != 0) && (jfgFrame[0].extra.z > 0.0f)) {
             const uint normalSlot = gpuTile.jfgMaterial & 0x3FF;
             const uint specularSlot = (gpuTile.jfgMaterial >> 10) & 0x3FF;
@@ -367,7 +365,6 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             if (specularSlot != 0) {
                 jfgSpecularMap = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + specularSlot - 1);
                 jfgHasSpecularMap = true;
-                jfgGlow = max(jfgGlow, jfgSpecularMap.b);
             }
         }
 
@@ -515,15 +512,6 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
 
         shadeColor.rgb = saturate(shadeColor.rgb * ambient * painted + added);
-    }
-
-    // JFG PORT: glowing textures (lamps and screens painted into them) give off their own light: the darkness, the
-    // shadows and the lights don't change them, they show at the texture's own colour, as much as they glow
-    // (characters.z = the setting, 0 when modern lighting is off).
-    jfgGlow = saturate(jfgGlow * jfgF.characters.z);
-    if (jfgGlow > 0.0f) {
-        shadeColor.rgb = lerp(shadeColor.rgb, float3(1.0f, 1.0f, 1.0f), jfgGlow);
-        jfgSpecular *= 1.0f - jfgGlow;
     }
     float4 combinerColor;
     float alphaCompareValue;

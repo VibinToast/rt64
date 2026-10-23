@@ -38,10 +38,10 @@
 std::atomic<uint32_t> rt64_jfg_screen_fb{ 0 };
 std::atomic<uint32_t> rt64_jfg_screen_updates{ 0 };
 
-// JFG PORT: glowing textures (src/jfg/jfg_lighting_tool.cpp, the Glow tab): the memory the marked textures load from,
-// as physical [start, end) ranges with a strength (1-255) each. Every texture loaded while there are any is noted
-// with the address it was loaded from (State::fullSyncFramebufferPairTiles), so a tile finds its glow by its hash
-// (FramebufferRenderer::createGPUTiles) whenever the marks change, without loading the texture again.
+// JFG PORT: the level's textures' memory (src/jfg/jfg_lighting_tool.cpp, lights from emission maps), as physical
+// [start, end) ranges (a third value, unused). Every texture loaded while there are any is noted with the address it
+// was loaded from (State::fullSyncFramebufferPairTiles), so the port can find a level texture's hashes
+// (rt64_jfg_glow_hashes) and so its emission map.
 namespace {
     constexpr uint32_t JfgGlowAddressMask = 0x007FFFFF;
     std::mutex jfgGlowMutex;
@@ -139,28 +139,6 @@ bool rt64_jfg_picked(uint64_t *hash, uint32_t *width, uint32_t *height, uint32_t
     *height = jfgPickDone.height;
     *address = jfgPickDone.address;
     return true;
-}
-
-// A texture's glow (0-255) by its hash.
-uint32_t rt64_jfg_glow_for(uint64_t hash) {
-    if (!jfgGlowAny.load(std::memory_order_relaxed)) {
-        return 0;
-    }
-
-    std::lock_guard<std::mutex> lock(jfgGlowMutex);
-    const auto it = jfgGlowAddresses.find(hash);
-    if (it == jfgGlowAddresses.end()) {
-        return 0;
-    }
-
-    uint32_t glow = 0;
-    for (size_t i = 0; (i + 2) < jfgGlowRanges.size(); i += 3) {
-        if ((it->second >= jfgGlowRanges[i]) && (it->second < jfgGlowRanges[i + 1])) {
-            glow = std::max(glow, std::min(jfgGlowRanges[i + 2], 255U));
-        }
-    }
-
-    return glow;
 }
 
 // JFG PORT: the game's dynamic lights (its track lights: muzzle flashes, lamps, glowing pickups) for each frame, keyed

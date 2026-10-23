@@ -149,7 +149,6 @@ bool rt64_jfg_emission_colour(uint64_t hash, float *rgb) {
 //   shadows (0/1), 14 the size of the area around the view it shadows, 15 how much authored material maps count,
 //   16 the level's smooth surface directions on (0/1), 17 shine strength on characters, 18 its sharpness.
 static std::mutex jfgParamsMutex;
-uint32_t rt64_jfg_glow_for(uint64_t hash); // src/hle/rt64_state.cpp
 static float jfgParams[20] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
     std::lock_guard<std::mutex> lock(jfgParamsMutex);
@@ -370,7 +369,6 @@ namespace RT64 {
                     gpuTile.flags.rawTMEM = false;
                     gpuTile.flags.hasMipmaps = false;
                     gpuTile.flags.jfgSoft = tileCopy.jfgSmallSource; // JFG PORT
-                    gpuTile.flags.jfgGlow = 0;
                     gpuTile.jfgMaterial = 0;
                 }
             }
@@ -395,7 +393,6 @@ namespace RT64 {
                 gpuTile.flags.hasMipmaps = hasMipmaps;
                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
                 gpuTile.flags.jfgSoft = false; // JFG PORT
-                gpuTile.flags.jfgGlow = rt64_jfg_glow_for(callTile.tmemHashOrID);
                 gpuTile.jfgMaterial = jfgMaterialFor(callTile.tmemHashOrID, textureCache);
             }
         }
@@ -2741,8 +2738,8 @@ namespace RT64 {
     }
 
     // JFG PORT: the material maps of a texture (by its hash), as GPUTile::jfgMaterial: <16 hex digits of the hash>_n.png
-    // (normal map, tangent space with green up), _s.png (specular: red = how strong the shine, green = how sharp,
-    // blue = how much the texture glows in its own colour) and _e.png (emission: the light the surface gives off, added
+    // (normal map, tangent space with green up), _s.png (specular: red = how strong the shine, green = how sharp)
+    // and _e.png (emission: the light the surface gives off, added
     // on top, black = none),
     // in the materials folder next to the game or anywhere in a texture pack (scanJfgMaterials). A texture's maps are
     // loaded the first time it is drawn (a pack's file is read here, under the texture cache's lock, then decoded on a
