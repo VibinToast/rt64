@@ -216,6 +216,7 @@ namespace RT64 {
 
                 RenderTargetKey colorTargetKey(presentFb->addressStart, presentFb->width, presentFb->siz, Framebuffer::Type::Color);
                 colorTarget = &targetManager.get(colorTargetKey, true);
+                RenderTarget::jfgPresentBegin(colorTarget); // JFG PORT: until this frame is drawn (see jfgPresentBegin)
                 if (!colorTarget->isEmpty()) {
                     // If a depth framebuffer is about to be shown, convert it to color.
                     if (presentFb->isLastWriteDifferent(Framebuffer::Type::Color)) {
@@ -250,6 +251,7 @@ namespace RT64 {
 
                 RenderTargetKey colorTargetKey(fbAddress, scratchFb.width, scratchFb.siz, Framebuffer::Type::Color);
                 colorTarget = &targetManager.get(colorTargetKey, true);
+                RenderTarget::jfgPresentBegin(colorTarget); // JFG PORT: until this frame is drawn (see jfgPresentBegin)
                 colorTarget->resize(ext.presentGraphicsWorker, scratchFb.width, scratchFb.height);
                 colorTarget->resolutionScale = { 1.0f, 1.0f };
                 colorTarget->downsampleMultiplier = 1;
@@ -288,6 +290,9 @@ namespace RT64 {
         for (int32_t i = 0; i < framesToPresent; i++) {
             uint32_t frameCountersNextPresented = 0;
             if ((framesToPresent > 1) && (usingMSAA || (i > 0))) {
+                // JFG PORT: the target before is no longer drawn from; the workload queue may need it to make this one.
+                RenderTarget::jfgPresentEnd();
+
                 // Stall until the interpolated color target is available.
                 const uint32_t targetIndex = usingMSAA ? i : (i - 1);
                 std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
@@ -304,9 +309,12 @@ namespace RT64 {
                     frameCountersNextPresented = frameCounters.presented + 1;
                 }
 
-                if (i < framesToPresent) {
-                    uint32_t targetIndex = usingMSAA ? i : (i - 1);
-                    colorTarget = ext.sharedResources->interpolatedColorTargets[targetIndex].get();
+                // JFG PORT: marked as drawn from while the lock is held, so it can't be released in between (jfgPresentBegin);
+                // the list is emptied when the screen size changes.
+                const auto &interpolatedTargets = ext.sharedResources->interpolatedColorTargets;
+                if ((i < framesToPresent) && (targetIndex < interpolatedTargets.size())) {
+                    colorTarget = interpolatedTargets[targetIndex].get();
+                    RenderTarget::jfgPresentBegin(colorTarget);
                 }
                 else {
                     colorTarget = nullptr;
@@ -406,6 +414,8 @@ namespace RT64 {
                     ext.presentGraphicsWorker->wait();
                 }
             }
+
+            RenderTarget::jfgPresentEnd(); // JFG PORT: see jfgPresentBegin
 
             if (lockedWorkloadMutex) {
                 ext.sharedResources->workloadMutex.unlock();
