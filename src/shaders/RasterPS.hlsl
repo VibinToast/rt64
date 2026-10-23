@@ -212,6 +212,8 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const uint casterCount = gConstants.padding.y >> 16;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
+        const float ambient = float(gConstants.padding.x >> 24) / 128.0f; // the level's own colours are its ambient light
+        shadeColor.rgb *= ambient;
         float3 added = float3(0.0f, 0.0f, 0.0f);
         for (uint i = 0; i < lightCount; i++) {
             const JfgLight light = jfgLights[i];

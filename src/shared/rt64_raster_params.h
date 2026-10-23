@@ -15,6 +15,7 @@
 #define RASTER_JFG_LEVEL        0x4 // the level's own geometry: light it per pixel with padding.y of the frame's lights
 #define RASTER_JFG_DEBUG_NORMAL 0x8 // show the surface direction as colour
 // padding.x bits 16-23: how dark the shadows of characters and objects are (0-255).
+// padding.x bits 24-31: the level's ambient, a scale on its own colours (128 = as the game, 0-255 = 0 to ~2).
 // padding.y: the frame's lights (low 16 bits) and shadow casters (high 16 bits) for the level lighting.
 // padding.z (float bits): how much the level lighting depends on which way a surface faces its light (0-1).
 
