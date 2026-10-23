@@ -14,7 +14,8 @@
 // JFG PORT: the world position of every vertex the RSP processed (RSPProcessCS, the workload's jfgWorldPosBuffer,
 // float4 per vertex; FramebufferRendererDescriptorCommonSet::jfgWorldPos). Indexed draws read it by SV_VertexID.
 ByteAddressBuffer jfgWorldPos : register(t68, space0);
-// ... and a character's normal in the world (jfgWorldNormBuffer; w = object slot + 1, 0 = not a character).
+// ... and a character's normal in the world (jfgWorldNormBuffer; w = object slot + 1, 0 = not a character, 255 = the
+// level's smooth direction).
 ByteAddressBuffer jfgWorldNorm : register(t71, space0);
 
 LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in float2 iUV, in float4 iColor, in uint iVertexId, out float4 oPosition, out float2 oUV, out float4 oSmoothColor, out float4 oFlatColor, out float4 oWorldPos, out float4 oWorldNorm) {

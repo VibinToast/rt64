@@ -95,6 +95,46 @@ void rt64_jfg_level_vertices(const uint32_t *ranges, uint32_t count) {
     jfgLevelRanges.assign(ranges, ranges + count * 2);
 }
 
+// JFG PORT: the level's smooth surface directions (src/jfg/jfg_lighting.cpp, send_level_normals), sent once per level:
+// per vertex array (physical start, vertex count, offset into the directions), sorted by start here, and per vertex
+// s8 x, y, z (0 = none). A level vertex load takes its vertex's direction, marked with 0xFF in the top byte.
+namespace {
+    struct JfgLevelNormalRange {
+        uint32_t start, count, offset;
+    };
+
+    std::vector<JfgLevelNormalRange> jfgLevelNormalRanges;
+    std::vector<uint32_t> jfgLevelNormals;
+}
+
+void rt64_jfg_level_normals(const uint32_t *ranges, uint32_t rangeCount, const uint32_t *normals, uint32_t normalCount) {
+    std::lock_guard<std::mutex> lock(jfgLevelMutex);
+    jfgLevelNormalRanges.clear();
+    for (uint32_t i = 0; i < rangeCount; i++) {
+        jfgLevelNormalRanges.push_back({ ranges[i * 3], ranges[i * 3 + 1], ranges[i * 3 + 2] });
+    }
+
+    std::sort(jfgLevelNormalRanges.begin(), jfgLevelNormalRanges.end(), [](const JfgLevelNormalRange &a, const JfgLevelNormalRange &b) { return a.start < b.start; });
+    jfgLevelNormals.assign(normals, normals + normalCount);
+}
+
+static uint32_t jfgLevelNormal(uint32_t address) {
+    // Called with jfgLevelMutex held.
+    auto it = std::upper_bound(jfgLevelNormalRanges.begin(), jfgLevelNormalRanges.end(), address, [](uint32_t a, const JfgLevelNormalRange &r) { return a < r.start; });
+    if (it == jfgLevelNormalRanges.begin()) {
+        return 0;
+    }
+
+    --it;
+    const uint32_t index = (address - it->start) / 10;
+    if ((index >= it->count) || ((it->offset + index) >= jfgLevelNormals.size())) {
+        return 0;
+    }
+
+    const uint32_t n = jfgLevelNormals[it->offset + index];
+    return (n != 0) ? (n | 0xFF000000U) : 0;
+}
+
 static bool jfgIsLevelVertex(uint32_t address) {
     std::lock_guard<std::mutex> lock(jfgLevelMutex);
     for (size_t i = 0; (i + 1) < jfgLevelRanges.size(); i += 2) {
@@ -981,7 +1021,17 @@ namespace RT64 {
             dst.color.g = *state->fromRDRAM((src + 7) ^ 0x3);
             dst.color.b = *state->fromRDRAM((src + 8) ^ 0x3);
             dst.color.a = *state->fromRDRAM((src + 9) ^ 0x3);
-            jfgNormals[dstIndex + i] = DKR.jfg ? state->jfgObjectNormal(src) : 0; // JFG PORT
+            jfgNormals[dstIndex + i] = (DKR.jfg && !DKR.jfgLevel) ? state->jfgObjectNormal(src) : 0; // JFG PORT
+        }
+
+        // JFG PORT: the level's smooth directions for its vertices.
+        if (DKR.jfg && DKR.jfgLevel) {
+            std::lock_guard<std::mutex> lock(jfgLevelMutex);
+            if (!jfgLevelNormals.empty()) {
+                for (uint32_t i = 0; i < vtxCount; i++) {
+                    jfgNormals[dstIndex + i] = jfgLevelNormal(rdramAddress + i * 10);
+                }
+            }
         }
 
         // F3DDKR billboards transform vertex zero with the regular MVP, then

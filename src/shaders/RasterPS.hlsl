@@ -238,7 +238,19 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // JFG PORT: the surface's direction from how the world position changes across the screen: one direction per
     // triangle (the level has no normals). Worked out here, outside any branch, as screen-space derivatives need.
     // ddy x ddx points towards the camera for every visible surface.
-    const float3 jfgNormal = normalize(cross(ddy(vertexWorldPos.xyz), ddx(vertexWorldPos.xyz)));
+    const float3 jfgFlatNormal = normalize(cross(ddy(vertexWorldPos.xyz), ddx(vertexWorldPos.xyz)));
+    // JFG PORT: on the level, its smooth direction (vertexWorldNorm.w = 255, src/jfg/jfg_lighting.cpp) blended with the
+    // flat one of the triangle: fully smooth where they are within 30 degrees, flat beyond 45 (a real corner), so
+    // shine, detail and facing flow across neighbouring planes and corners stay sharp.
+    const bool jfgLevelSmooth = (vertexWorldNorm.w > 254.5f) && (dot(vertexWorldNorm.xyz, vertexWorldNorm.xyz) > 0.25f) && (jfgFrame[0].extra.w > 0.5f);
+    const bool jfgCharacter = (vertexWorldNorm.w > 0.5f) && (vertexWorldNorm.w < 254.5f);
+    float3 jfgNormal = jfgFlatNormal;
+    if (jfgLevelSmooth) {
+        float3 smoothN = normalize(vertexWorldNorm.xyz);
+        smoothN = (dot(smoothN, jfgFlatNormal) < 0.0f) ? -smoothN : smoothN;
+        const float agree = smoothstep(0.707f, 0.866f, dot(smoothN, jfgFlatNormal));
+        jfgNormal = normalize(lerp(jfgFlatNormal, smoothN, agree));
+    }
     const ColorCombiner colorCombiner = { rp.ccL, rp.ccH };
     const bool depthClampNear = renderFlagNoN(rp.flags);
     const bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
@@ -322,7 +334,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     bool jfgHasNormalMap = false;
     bool jfgHasSpecularMap = false;
     const bool jfgDetailOn = (jfgFrame[0].material.x > 0.0f) &&
-        (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && (vertexWorldNorm.w > 0.5f)));
+        (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && jfgCharacter));
     float2 jfgTexGrad = float2(0.0f, 0.0f);
     if (renderFlagUsesTexture0(rp.flags)) {
         const uint globalTileIndex = instanceRenderIndices[gConstants.renderIndex].rdpTileIndex + tileIndex0;
@@ -401,7 +413,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // (vertexWorldNorm.w = object slot + 1): base colour (in the vertex colour) x (ambient, scaled with the level's,
     // + each of the game's directions by how much the surface faces it, shadowed by its light's shadow map when that
     // light has one), the directional light, then the frame's lights by the object's share of them.
-    if ((vertexWorldNorm.w > 0.5f) && (vertexWorldPos.w > 0.5f)) {
+    if (jfgCharacter && (vertexWorldPos.w > 0.5f)) {
         const JfgObjectLight object = jfgObjects[uint(vertexWorldNorm.w + 0.5f) - 1];
         const float3 n = normalize(vertexWorldNorm.xyz);
         const float3 nb = jfgHasNormalMap ? jfgMappedNormal(n, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.extra.z)
@@ -473,7 +485,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
                 const float3 l = toLight / max(d, 0.001f);
                 const float towards = saturate(dot(jfgNormal, l));
                 const float relief = saturate(1.0f + dot(nb, l) - dot(jfgNormal, l)); // the detail's light and shade
-                const float visibility = jfgShadowVisibility(vertexWorldPos.xyz, jfgNormal, light, darkness);
+                const float visibility = jfgShadowVisibility(vertexWorldPos.xyz, jfgFlatNormal, light, darkness);
                 const float reach = saturate((radius - d) / (radius - inner));
                 const float3 lit = light.colorInner.rgb * reach * visibility;
                 added += lit * lerp(1.0f, towards, facing) * relief;
@@ -485,7 +497,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
 
         if (jfgF.sunDir.w > 0.5f) {
-            const float3 sun = jfgF.sunColor.rgb * jfgSunVisibility(vertexWorldPos.xyz, jfgNormal, darkness);
+            const float3 sun = jfgF.sunColor.rgb * jfgSunVisibility(vertexWorldPos.xyz, jfgFlatNormal, darkness);
             added += sun * saturate(dot(nb, jfgF.sunDir.xyz));
             jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
         }
@@ -615,12 +627,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         for (uint i = 0; i < lightCount; i++) {
             const JfgLight light = jfgLights[i];
             if (distance(light.posRadius.xyz, vertexWorldPos.xyz) < light.posRadius.w) {
-                shadow = max(shadow, 1.0f - jfgShadowVisibility(vertexWorldPos.xyz, jfgNormal, light, 1.0f));
+                shadow = max(shadow, 1.0f - jfgShadowVisibility(vertexWorldPos.xyz, jfgFlatNormal, light, 1.0f));
             }
         }
 
         if (jfgFrame[0].sunDir.w > 0.5f) {
-            shadow = max(shadow, 1.0f - jfgSunVisibility(vertexWorldPos.xyz, jfgNormal, 1.0f));
+            shadow = max(shadow, 1.0f - jfgSunVisibility(vertexWorldPos.xyz, jfgFlatNormal, 1.0f));
         }
 
         resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 0.0f, 0.0f), shadow);

@@ -70,7 +70,8 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     float4 tfPos = mul(mul(viewProjMat, worldMat), framePos);
     dstWorldPos[vertexOffsetIndex] = float4(mul(worldMat, framePos).xyz, 1.0f); // JFG PORT
 
-    // JFG PORT: a character's normal is in its joint's space, as its position: the joint's matrix turns it.
+    // JFG PORT: a character's normal is in its joint's space, as its position: the joint's matrix turns it. The level's
+    // smooth directions (top byte 0xFF) are turned the same way, by the level's matrix.
     const uint jfgPacked = srcJfgNormals[vertexOffsetIndex];
     float4 jfgNorm = float4(0.0f, 0.0f, 0.0f, 0.0f);
     if ((jfgPacked >> 24) != 0) {

@@ -39,7 +39,8 @@ namespace interop {
                             // w = how much a shadow takes from the level's painted glow (0-1)
         float4 shadowFade;  // how much each shadow map row's shadows count (rows 1-4), so lights fade in and out
         float4 extra;       // x = share of the surface detail on characters and objects (0-1), y = the directional
-                            // light's shadow map depth half range, z = how much authored material maps count (0 = off)
+                            // light's shadow map depth half range, z = how much authored material maps count (0 = off),
+                            // w = the level's smooth surface directions on (0/1)
         float4 sunShadow;   // xyz = centre of the directional light's shadow map, w = its half size (0 = none)
     };
 #ifdef HLSL_CPU

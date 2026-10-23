@@ -109,12 +109,13 @@ namespace {
 //   0-2 direction towards the directional light, 3 on (0/1), 4-6 its colour x intensity, 7 how much it lights
 //   characters, 8 surface detail height, 9 shine strength, 10 shine sharpness, 11 how much a shadow takes from the
 //   level's painted glow, 12 share of the surface detail on characters and objects, 13 the directional light casts
-//   shadows (0/1), 14 the size of the area around the view it shadows, 15 how much authored material maps count.
+//   shadows (0/1), 14 the size of the area around the view it shadows, 15 how much authored material maps count,
+//   16 the level's smooth surface directions on (0/1).
 static std::mutex jfgParamsMutex;
-static float jfgParams[16] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
+static float jfgParams[20] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
     std::lock_guard<std::mutex> lock(jfgParamsMutex);
-    memcpy(jfgParams, params, sizeof(float) * std::min(count, 16U));
+    memcpy(jfgParams, params, sizeof(float) * std::min(count, 20U));
 }
 std::atomic<float> rt64_jfg_level_ambient{ 1.0f }; // a scale on the level's own colours, its ambient light (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
@@ -2568,7 +2569,7 @@ namespace RT64 {
             }
         }
 
-        float params[16];
+        float params[20];
         {
             std::lock_guard<std::mutex> lock(jfgParamsMutex);
             memcpy(params, jfgParams, sizeof(params));
@@ -2589,7 +2590,7 @@ namespace RT64 {
         }
 
         frame.shadowFade = { fade[0], fade[1], fade[2], fade[3] };
-        frame.extra = { params[12], jfgSunRange, params[15], 0.0f };
+        frame.extra = { params[12], jfgSunRange, params[15], params[16] };
 
         // The directional light's shadow map: a square around where the camera looks ([1] of the frame's points),
         // moved only in whole texels across the light's view so its edges don't crawl as the camera moves.
