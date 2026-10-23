@@ -102,6 +102,28 @@ namespace RT64 {
         RenderPipeline *ssaoBlurPipeline = nullptr; // JFG PORT: bloom layout
         RenderPipeline *fogPipeline = nullptr; // JFG PORT
         RenderPipeline *vignettePipeline = nullptr; // JFG PORT
+        // JFG PORT: shadow maps for the nearest lights (recordJfgShadows, JfgShadow.hlsli). The level's and the
+        // characters' triangles of the frame (from the draws' ranges of the shared index list), the lights given a
+        // cube (lifted position, far; one atlas row each) and the atlas: six tiles a row, JfgShadowRows rows.
+        static const uint32_t JfgShadowRows = 4;
+        RenderPipeline *jfgShadowPipeline = nullptr;
+        std::vector<uint32_t> jfgShadowIndices;
+        struct JfgShadowCandidate {
+            uint32_t start, end, transformsIndex;
+            bool level;
+        };
+        std::vector<JfgShadowCandidate> jfgShadowCandidates; // one framebuffer's (addFramebuffer)
+        BufferPair jfgShadowIndicesBuffer;
+        RenderIndexBufferView jfgShadowIndexView;
+        std::vector<hlslpp::float4> jfgShadowLights; // xyz = where the shadows are thrown from, w = far
+        uint32_t jfgShadowTile = 0;
+        bool jfgShadowAtlasReadable = false;
+        std::unique_ptr<RenderTexture> jfgShadowAtlas;
+        std::unique_ptr<RenderTextureView> jfgShadowAtlasView;
+        std::unique_ptr<RenderFramebuffer> jfgShadowFramebuffer;
+        std::vector<std::unique_ptr<RenderTexture>> jfgShadowRetired;
+        std::vector<std::unique_ptr<RenderTextureView>> jfgShadowRetiredViews;
+        std::vector<std::unique_ptr<RenderFramebuffer>> jfgShadowRetiredFramebuffers;
         // JFG PORT: bloom. Two small buffers per bloom-buffer size (kept: sizes rarely change, and a buffer may still
         // be referenced by the command list being recorded), and the descriptor sets made while recording one workload.
         struct BloomBuffers {
@@ -141,6 +163,8 @@ namespace RT64 {
         RenderPipeline *bloomBlurPipeline = nullptr;
         RenderPipeline *bloomCompositePipeline = nullptr;
         BloomBuffers *getBloomBuffers(RenderWorker *worker, uint32_t width, uint32_t height, bool ssao = false);
+        void updateJfgShadowAtlas(RenderWorker *worker); // JFG PORT
+        void recordJfgShadows(RenderWorker *worker); // JFG PORT
         RenderDescriptorSet *makeBloomDescriptorSet(RenderWorker *worker, RenderTexture *texture, RenderTextureView *textureView);
         std::unique_ptr<FramebufferRendererDescriptorCommonSet> descCommonSet;
         std::unique_ptr<FramebufferRendererDescriptorTextureSet> descTextureSet;

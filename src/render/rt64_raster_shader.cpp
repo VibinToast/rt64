@@ -20,6 +20,7 @@
 #include "shaders/PostBlendDitherNoiseSubPS.hlsl.spirv.h"
 #include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.spirv.h"
 #include "shaders/FullScreenVS.hlsl.spirv.h"
+#include "shaders/JfgShadowVS.hlsl.spirv.h"
 #include "shaders/SsaoPS.hlsl.spirv.h"
 #include "shaders/SsaoPSMS.hlsl.spirv.h"
 #include "shaders/FogPS.hlsl.spirv.h"
@@ -41,6 +42,7 @@
 #   include "shaders/PostBlendDitherNoiseSubPS.hlsl.dxil.h"
 #   include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.dxil.h"
 #   include "shaders/FullScreenVS.hlsl.dxil.h"
+#   include "shaders/JfgShadowVS.hlsl.dxil.h"
 #   include "shaders/SsaoPS.hlsl.dxil.h"
 #   include "shaders/SsaoPSMS.hlsl.dxil.h"
 #   include "shaders/FogPS.hlsl.dxil.h"
@@ -65,6 +67,7 @@
 #   include "shaders/PostBlendDitherNoiseSubPS.hlsl.metal.h"
 #   include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.metal.h"
 #   include "shaders/FullScreenVS.hlsl.metal.h"
+#   include "shaders/JfgShadowVS.hlsl.metal.h"
 #   include "shaders/SsaoPS.hlsl.metal.h"
 #   include "shaders/SsaoPSMS.hlsl.metal.h"
 #   include "shaders/FogPS.hlsl.metal.h"
@@ -631,6 +634,42 @@ namespace RT64 {
             ssaoDesc.vertexShader = ssaoVertexShader.get();
             ssaoDesc.pixelShader = ssaoPixelShader.get();
             ssaoPipeline = device->createGraphicsPipeline(ssaoDesc);
+        }
+
+        // JFG PORT: the faces of the lights' shadow cubes (JfgShadowVS.hlsl, FramebufferRenderer::recordJfgShadows):
+        // depth only, into the shadow atlas, both sides of every triangle (the game's models are often one-sided).
+        std::unique_ptr<RenderShader> jfgShadowVertexShader;
+        switch (shaderFormat) {
+#   ifdef _WIN32
+        case RenderShaderFormat::DXIL:
+            jfgShadowVertexShader = device->createShader(JfgShadowVSBlobDXIL, std::size(JfgShadowVSBlobDXIL), "VSMain", shaderFormat);
+            break;
+#   endif
+        case RenderShaderFormat::SPIRV:
+            jfgShadowVertexShader = device->createShader(JfgShadowVSBlobSPIRV, std::size(JfgShadowVSBlobSPIRV), "VSMain", shaderFormat);
+            break;
+#   ifdef __APPLE__
+        case RenderShaderFormat::METAL:
+            jfgShadowVertexShader = device->createShader(JfgShadowVSBlobMSL, std::size(JfgShadowVSBlobMSL), "VSMain", shaderFormat);
+            break;
+#   endif
+        default:
+            break;
+        }
+
+        if (jfgShadowVertexShader != nullptr) {
+            RenderGraphicsPipelineDesc shadowDesc;
+            shadowDesc.renderTargetCount = 0;
+            shadowDesc.cullMode = RenderCullMode::NONE;
+            shadowDesc.depthEnabled = true;
+            shadowDesc.depthWriteEnabled = true;
+            shadowDesc.depthClipEnabled = true;
+            shadowDesc.depthFunction = RenderComparisonFunction::LESS;
+            shadowDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            shadowDesc.pipelineLayout = pipelineLayout.get();
+            shadowDesc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+            shadowDesc.vertexShader = jfgShadowVertexShader.get();
+            jfgShadowPipeline = device->createGraphicsPipeline(shadowDesc);
         }
 
         // JFG PORT: depth-based fog (blends towards the fog colour by the shader's alpha) and vignette (multiplies, as the

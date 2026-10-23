@@ -80,6 +80,8 @@ std::atomic<int> rt64_jfg_debug_shadow{ 0 };   // paint the casters' shadows red
 std::atomic<int> rt64_jfg_debug_normal{ 0 };   // show the surface direction as colour (RasterPS; F9 Lighting tab)
 std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting depends on facing the light, 0-1 (RasterPS)
 std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
+std::atomic<int> rt64_jfg_shadow_lights{ 4 };  // how many of the nearest lights get a shadow map, 0-4 (recordJfgShadows)
+std::atomic<int> rt64_jfg_shadow_size{ 512 };  // each shadow map face's size in texels
 std::atomic<float> rt64_jfg_level_ambient{ 1.0f }; // a scale on the level's own colours, its ambient light (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
 std::atomic<float> rt64_jfg_vignette_size{ 0.45f };
@@ -208,6 +210,10 @@ namespace RT64 {
         bloomDescriptorSets.clear(); // JFG PORT: the previous workload has finished on the GPU by now
         bloomBuffersRetired.clear();
         bloomSnapshotRetired.clear();
+        jfgShadowRetired.clear(); // JFG PORT
+        jfgShadowRetiredViews.clear();
+        jfgShadowRetiredFramebuffers.clear();
+        jfgShadowIndices.clear();
         jfgFrame++;
         renderIndicesVector.clear();
         rspSmoothNormalVector.clear();
@@ -368,6 +374,9 @@ namespace RT64 {
         descCommonSet->setBuffer(descCommonSet->jfgCasters, jfgCastersBuffer.get(), sizeof(hlslpp::float4) * jfgCasters.size(), RenderBufferStructuredView(sizeof(hlslpp::float4)));
         descCommonSet->setBuffer(descCommonSet->jfgWorldNorm, outputBuffers->jfgWorldNormBuffer.buffer.get(), outputBuffers->jfgWorldNormBuffer.allocatedSize);
         descCommonSet->setBuffer(descCommonSet->jfgObjects, jfgObjectsBuffer.get(), sizeof(interop::JfgObjectLight) * jfgObjects.size(), RenderBufferStructuredView(sizeof(interop::JfgObjectLight)));
+        if (jfgShadowAtlas != nullptr) {
+            descCommonSet->setTexture(descCommonSet->jfgShadowMap, jfgShadowAtlas.get(), RenderTextureLayout::DEPTH_READ, jfgShadowAtlasView.get());
+        }
 
 #   if RT_ENABLED
         if (raytracingEnabled) {
@@ -1820,6 +1829,7 @@ namespace RT64 {
 
         shaderUploader->commandListAfterBarriers(worker);
         pendingUploaders = bufferUploaders;
+        recordJfgShadows(worker); // JFG PORT: after the world positions and the uploads
 
         if (!dynamicTextureBarrierVector.empty()) {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, dynamicTextureBarrierVector);
@@ -1955,6 +1965,7 @@ namespace RT64 {
         ssaoPipeline = rasterShaderUber->ssaoPipeline.get();
         fogPipeline = rasterShaderUber->fogPipeline.get();
         vignettePipeline = rasterShaderUber->vignettePipeline.get();
+        jfgShadowPipeline = rasterShaderUber->jfgShadowPipeline.get(); // JFG PORT
         bloomPipelineLayout = rasterShaderUber->bloomPipelineLayout.get();
         bloomExtractPipeline = rasterShaderUber->bloomExtractPipeline.get();
         bloomBlurPipeline = rasterShaderUber->bloomBlurPipeline.get();
@@ -2264,6 +2275,16 @@ namespace RT64 {
                             instanceDrawCall.type = InstanceDrawCall::Type::IndexedTriangles;
                             triangles.indexStart = triangles.vertexTestZ ? vertexTestZFaceIndicesStart : call.meshDesc.faceIndicesStart;
                             invRatioScale = projInvRatioScale;
+
+                            // JFG PORT: what may go into the lights' shadow maps: the level, and 3D draws that write
+                            // depth (characters, objects; not glows, flames or smoke), kept if they turn out to be seen
+                            // through the level's camera (the HUD's 3D parts have their own).
+                            const uint32_t shadowStart = call.meshDesc.faceIndicesStart;
+                            const uint32_t shadowEnd = shadowStart + call.callDesc.triangleCount * 3;
+                            const bool shadowWorld = (proj.type == Projection::Type::Perspective) && (call.callDesc.jfgLevel || call.shaderDesc.otherMode.zUpd());
+                            if (!triangles.vertexTestZ && shadowWorld && (shadowEnd > shadowStart) && (shadowEnd <= drawData.faceIndices.size())) {
+                                jfgShadowCandidates.push_back({ shadowStart, shadowEnd, proj.transformsIndex, call.callDesc.jfgLevel });
+                            }
                             break;
                         }
                         case Projection::Type::Rectangle: {
@@ -2403,6 +2424,22 @@ namespace RT64 {
         checkRtScene(rtScene);
 #   endif
         checkRasterScene(rasterScene);
+
+        // JFG PORT: the shadow map triangles: the level, and the candidates with the projection of one of its draws.
+        for (const JfgShadowCandidate &c : jfgShadowCandidates) {
+            bool keep = c.level;
+            for (size_t i = 0; !keep && (i < jfgShadowCandidates.size()); i++) {
+                const JfgShadowCandidate &l = jfgShadowCandidates[i];
+                keep = l.level && ((l.transformsIndex == c.transformsIndex) ||
+                    (matrixDifference(drawData.projTransforms[l.transformsIndex], drawData.projTransforms[c.transformsIndex]) < 1e-4f));
+            }
+
+            if (keep) {
+                jfgShadowIndices.insert(jfgShadowIndices.end(), drawData.faceIndices.begin() + c.start, drawData.faceIndices.begin() + c.end);
+            }
+        }
+
+        jfgShadowCandidates.clear();
     }
 
     void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, const std::vector<interop::PointLight> &casters,
@@ -2427,6 +2464,23 @@ namespace RT64 {
                 l.attenuationRadius };
             dst.colorInner = { l.diffuseColor.x, l.diffuseColor.y, l.diffuseColor.z, l.pointRadius };
             jfgLights.emplace_back(dst);
+        }
+
+        // Shadow maps for the nearest few (sent first), thrown from above the light (JFG_SHADOW_LIFT, JfgShadow.hlsli)
+        // out to the farthest point it lights.
+        const float ShadowLift = 40.0f;
+        const size_t shadowed = (rt64_jfg_shadows.load(std::memory_order_relaxed) > 0.0f) ?
+            size_t(std::clamp(rt64_jfg_shadow_lights.load(std::memory_order_relaxed), 0, int(JfgShadowRows))) : 0;
+        jfgShadowLights.clear();
+        for (interop::JfgLight &light : jfgLights) {
+            if ((jfgShadowLights.size() < shadowed) && (float(light.posRadius.w) > 1.0f)) {
+                const float farPlane = float(light.posRadius.w) + ShadowLift + 8.0f;
+                light.shadow = { float(jfgShadowLights.size() + 1), 1.0f, farPlane, 0.0f };
+                jfgShadowLights.emplace_back(float(light.posRadius.x), float(light.posRadius.y) + ShadowLift, float(light.posRadius.z), farPlane);
+            }
+            else {
+                light.shadow = { 0.0f, 0.0f, 0.0f, 0.0f };
+            }
         }
 
         jfgLightCount = uint32_t(jfgLights.size());
@@ -2459,6 +2513,15 @@ namespace RT64 {
             { jfgCasters.data(), { 0, jfgCasters.size() }, sizeof(hlslpp::float4), RenderBufferFlag::STORAGE, { }, &jfgCastersBuffer },
             { jfgObjects.data(), { 0, jfgObjects.size() }, sizeof(interop::JfgObjectLight), RenderBufferFlag::STORAGE, { }, &jfgObjectsBuffer }
         };
+
+        // JFG PORT: the shadow maps' triangles (never empty for the upload) and their atlas.
+        if (jfgShadowIndices.empty()) {
+            jfgShadowLights.clear();
+            jfgShadowIndices.assign(3, 0);
+        }
+
+        shaderUploads.push_back({ jfgShadowIndices.data(), { 0, jfgShadowIndices.size() }, sizeof(uint32_t), RenderBufferFlag::INDEX, { }, &jfgShadowIndicesBuffer });
+        updateJfgShadowAtlas(worker);
 
 #   if RT_ENABLED
         // FIXME: Add support for multiple raytracing scenes.
@@ -2510,7 +2573,82 @@ namespace RT64 {
 #   endif
 
         shaderUploader->submit(worker, shaderUploads);
+        jfgShadowIndexView = RenderIndexBufferView(RenderBufferReference(jfgShadowIndicesBuffer.get()), uint32_t(sizeof(uint32_t) * jfgShadowIndices.size()), RenderFormat::R32_UINT); // JFG PORT
         updateShaderViews(worker, drawBuffers, outputBuffers, shaderViewRtEnabled);
+    }
+
+    // JFG PORT: the shadow atlas at the size set (six faces a row, JfgShadowRows rows). A replaced one is kept until
+    // the next workload, as the command list being recorded may still use it.
+    void FramebufferRenderer::updateJfgShadowAtlas(RenderWorker *worker) {
+        const uint32_t tile = uint32_t(std::clamp(rt64_jfg_shadow_size.load(std::memory_order_relaxed), 128, 2048));
+        if ((jfgShadowAtlas != nullptr) && (jfgShadowTile == tile)) {
+            return;
+        }
+
+        if (jfgShadowAtlas != nullptr) {
+            jfgShadowRetired.emplace_back(std::move(jfgShadowAtlas));
+            jfgShadowRetiredViews.emplace_back(std::move(jfgShadowAtlasView));
+            jfgShadowRetiredFramebuffers.emplace_back(std::move(jfgShadowFramebuffer));
+        }
+
+        RenderClearValue clearValue = RenderClearValue::Depth(RenderDepth(), RenderFormat::D32_FLOAT);
+        jfgShadowAtlas = worker->device->createTexture(RenderTextureDesc::DepthTarget(tile * 6, tile * JfgShadowRows, RenderFormat::D32_FLOAT, RenderMultisampling(), &clearValue));
+        jfgShadowAtlas->setName("JFG Shadow Maps");
+        jfgShadowAtlasView = jfgShadowAtlas->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::D32_FLOAT));
+        jfgShadowFramebuffer = worker->device->createFramebuffer(RenderFramebufferDesc(nullptr, 0, jfgShadowAtlas.get()));
+        jfgShadowTile = tile;
+        jfgShadowAtlasReadable = false;
+    }
+
+    // JFG PORT: the faces of each shadowed light's cube, after the RSP has written the frame's world positions: the
+    // frame's shadow triangles drawn once per face into its tile (JfgShadowVS).
+    void FramebufferRenderer::recordJfgShadows(RenderWorker *worker) {
+        if (jfgShadowAtlas == nullptr) {
+            return;
+        }
+
+        const bool draw = (jfgShadowPipeline != nullptr) && (rendererPipelineLayout != nullptr) && !jfgShadowLights.empty();
+        if (!draw) {
+            if (!jfgShadowAtlasReadable) {
+                worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(jfgShadowAtlas.get(), RenderTextureLayout::DEPTH_READ));
+                jfgShadowAtlasReadable = true;
+            }
+
+            return;
+        }
+
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(jfgShadowAtlas.get(), RenderTextureLayout::DEPTH_WRITE));
+        worker->commandList->setFramebuffer(jfgShadowFramebuffer.get());
+        const RenderRect fullRect(0, 0, int32_t(jfgShadowTile * 6), int32_t(jfgShadowTile * JfgShadowRows));
+        worker->commandList->setViewports(RenderViewport(0.0f, 0.0f, float(fullRect.right), float(fullRect.bottom)));
+        worker->commandList->setScissors(fullRect);
+        worker->commandList->clearDepth();
+        worker->commandList->setPipeline(jfgShadowPipeline);
+        worker->commandList->setGraphicsPipelineLayout(rendererPipelineLayout);
+        worker->commandList->setGraphicsDescriptorSet(descCommonSet->get(), 0);
+        worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+        worker->commandList->setIndexBuffer(&jfgShadowIndexView);
+        const uint32_t indexCount = uint32_t(jfgShadowIndices.size());
+        for (uint32_t row = 0; row < uint32_t(jfgShadowLights.size()); row++) {
+            const hlslpp::float4 &light = jfgShadowLights[row];
+            interop::RasterParams params = {};
+            const float pos[3] = { float(light.x), float(light.y), float(light.z) };
+            memcpy(&params.padding, pos, sizeof(pos));
+            params.screenScale.x = 1.0f;
+            params.screenScale.y = float(light.w);
+            for (uint32_t face = 0; face < 6; face++) {
+                const int32_t x = int32_t(face * jfgShadowTile);
+                const int32_t y = int32_t(row * jfgShadowTile);
+                worker->commandList->setViewports(RenderViewport(float(x), float(y), float(jfgShadowTile), float(jfgShadowTile)));
+                worker->commandList->setScissors(RenderRect(x, y, x + int32_t(jfgShadowTile), y + int32_t(jfgShadowTile)));
+                params.renderIndex = face;
+                worker->commandList->setGraphicsPushConstants(0, &params);
+                worker->commandList->drawIndexedInstanced(indexCount, 1, 0, 0, 0);
+            }
+        }
+
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(jfgShadowAtlas.get(), RenderTextureLayout::DEPTH_READ));
+        jfgShadowAtlasReadable = true;
     }
 
     void FramebufferRenderer::advanceFrame(bool rtEnabled) {

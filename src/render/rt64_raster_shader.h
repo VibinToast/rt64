@@ -83,6 +83,7 @@ namespace RT64 {
         std::unique_ptr<RenderPipeline> postBlendDitherNoiseSubPipeline;
         std::unique_ptr<RenderPipeline> postBlendDitherNoiseSubNegativePipeline;
         std::unique_ptr<RenderPipeline> ssaoPipeline; // JFG PORT
+        std::unique_ptr<RenderPipeline> jfgShadowPipeline; // JFG PORT: the lights' shadow maps (JfgShadowVS)
         std::unique_ptr<RenderPipeline> ssaoBlurPipeline; // JFG PORT: bloom layout
         std::unique_ptr<RenderPipeline> fogPipeline; // JFG PORT
         std::unique_ptr<RenderPipeline> vignettePipeline; // JFG PORT
