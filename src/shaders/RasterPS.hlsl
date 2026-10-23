@@ -123,6 +123,35 @@ float jfgSunVisibility(float3 p, float3 n, float darkness) {
     return 1.0f - darkness * edge * (1.0f - lit);
 }
 
+// JFG PORT: a texture's authored material map (FramebufferRenderer::jfgMaterialFor) at the same place as the texture:
+// the texture's tile with the map's index and size instead, sampled as a high resolution replacement.
+float4 jfgSampleMaterial(OtherMode otherMode, RenderFlags flags, float2 uv, float2 ddxUV, float2 ddyUV, RDPTile rdpTile, GPUTile base, uint index) {
+    uint width, height;
+    gTextures[NonUniformResourceIndex(index)].GetDimensions(width, height);
+    const float2 dims = float2(width, height);
+    GPUTile tile = base;
+    tile.textureIndex = index;
+    tile.tcScale = base.tcScale * dims / max(base.textureDimensions.xy, float2(1.0f, 1.0f));
+    tile.ulScale = tile.tcScale;
+    tile.textureDimensions = float3(dims, 1.0f);
+    tile.flags = 0x2; // high resolution, nothing else
+    return sampleTexture(otherMode, flags, uv, ddxUV, ddyUV, rdpTile, tile, false);
+}
+
+// JFG PORT: an authored normal map's direction (tangent space, green up) on the surface n: the tangent frame from how
+// the texture coordinates change across the screen against the surface (the texture's t grows downwards), mixed in by
+// strength.
+float3 jfgMappedNormal(float3 n, float3 dpdx, float3 dpdy, float2 duvdx, float2 duvdy, float3 mapped, float strength) {
+    const float3 dp2perp = cross(dpdy, n);
+    const float3 dp1perp = cross(n, dpdx);
+    const float3 t = dp2perp * duvdx.x + dp1perp * duvdy.x;
+    const float3 b = dp2perp * duvdx.y + dp1perp * duvdy.y;
+    const float scale = rsqrt(max(max(dot(t, t), dot(b, b)), 1e-20f));
+    const float3 m = mapped * 2.0f - 1.0f;
+    const float3 world = normalize(t * scale * m.x - b * scale * m.y + n * max(m.z, 0.05f));
+    return normalize(lerp(n, world, saturate(strength)));
+}
+
 // JFG PORT: the surface direction tilted by the texture's detail: the texture's brightness taken as a height (height =
 // how many world units full white stands out), its change across the screen against how the surface spans the screen
 // (dpdx, dpdy) gives the slope (surface gradient, Mikkelsen, "Bump Mapping Unparametrized Surfaces on the GPU").
@@ -287,6 +316,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
     // JFG PORT: the texture's brightness one step along u and along v (the surface detail's slope, see below), sampled
     // as the texture itself is so it changes smoothly between texels.
+    // ... and its authored material maps, when it has them (extra.z = how much they count).
+    float4 jfgNormalMap = float4(0.5f, 0.5f, 1.0f, 1.0f);
+    float4 jfgSpecularMap = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    bool jfgHasNormalMap = false;
+    bool jfgHasSpecularMap = false;
     const bool jfgDetailOn = (jfgFrame[0].material.x > 0.0f) &&
         (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && (vertexWorldNorm.w > 0.5f)));
     float2 jfgTexGrad = float2(0.0f, 0.0f);
@@ -302,6 +336,20 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
+        if ((gpuTile.jfgMaterial != 0) && (jfgFrame[0].extra.z > 0.0f)) {
+            const uint normalSlot = gpuTile.jfgMaterial & 0xFFFF;
+            const uint specularSlot = gpuTile.jfgMaterial >> 16;
+            if (normalSlot != 0) {
+                jfgNormalMap = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + normalSlot - 1);
+                jfgHasNormalMap = true;
+            }
+
+            if (specularSlot != 0) {
+                jfgSpecularMap = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + specularSlot - 1);
+                jfgHasSpecularMap = true;
+            }
+        }
+
         if (jfgDetailOn) {
             const float3 toLum = float3(0.299f, 0.587f, 0.114f);
             const float lum = dot(texVal0.rgb, toLum);
@@ -337,8 +385,10 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     const float3 jfgDpdy = ddy(vertexWorldPos.xyz);
     const float jfgCameraDistance = distance(jfgF.camera.xyz, vertexWorldPos.xyz);
     const float jfgHeight = jfgF.material.x * saturate(1.5f - jfgCameraDistance / 1500.0f); // fades out with distance
-    const float jfgShineStrength = jfgF.material.y * lerp(0.25f, 1.0f, jfgTexLum);
-    const float jfgSharpness = max(jfgF.material.z, 1.0f);
+    // Shine: from the specular map when there is one (red = strength, green = sharpness 2 to 256), else from the
+    // texture's brightness with the settings' strength and sharpness.
+    const float jfgShineStrength = jfgHasSpecularMap ? (jfgSpecularMap.r * 2.0f * jfgF.extra.z) : (jfgF.material.y * lerp(0.25f, 1.0f, jfgTexLum));
+    const float jfgSharpness = jfgHasSpecularMap ? exp2(lerp(1.0f, 8.0f, jfgSpecularMap.g)) : max(jfgF.material.z, 1.0f);
     float3 jfgSpecular = float3(0.0f, 0.0f, 0.0f);
 
     // Color combiner.
@@ -354,7 +404,8 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     if ((vertexWorldNorm.w > 0.5f) && (vertexWorldPos.w > 0.5f)) {
         const JfgObjectLight object = jfgObjects[uint(vertexWorldNorm.w + 0.5f) - 1];
         const float3 n = normalize(vertexWorldNorm.xyz);
-        const float3 nb = jfgDetailNormal(n, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight * jfgF.extra.x); // their own share
+        const float3 nb = jfgHasNormalMap ? jfgMappedNormal(n, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.extra.z)
+            : jfgDetailNormal(n, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight * jfgF.extra.x); // their own share
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         // The first setting is the level's own light (its ambient and one direction, from the level header), so the
@@ -408,7 +459,8 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         const float ambient = float(gConstants.padding.x >> 24) / 128.0f; // the level's own colours are its ambient light
-        const float3 nb = jfgDetailNormal(jfgNormal, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight);
+        const float3 nb = jfgHasNormalMap ? jfgMappedNormal(jfgNormal, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.extra.z)
+            : jfgDetailNormal(jfgNormal, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight);
         float3 added = float3(0.0f, 0.0f, 0.0f);
         float painted = 1.0f; // how much of the level's own colours a shadow (and the detail) leaves
         for (uint i = 0; i < lightCount; i++) {

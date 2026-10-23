@@ -8,6 +8,12 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <thread>
+#include <unordered_set>
+
+#include "stb/stb_image.h"
 
 #include "../include/rt64_extended_gbi.h"
 #include "shared/rt64_jfg_bloom.h"
@@ -82,12 +88,28 @@ std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting de
 std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
 std::atomic<int> rt64_jfg_shadow_lights{ 4 };  // how many of the nearest lights get a shadow map, 0-4 (recordJfgShadows)
 std::atomic<int> rt64_jfg_shadow_size{ 512 };  // each shadow map face's size in texels
+std::atomic<int> rt64_jfg_material_files{ 0 };  // material maps found in materials/ (for the port's lighting tool)
+std::atomic<int> rt64_jfg_material_loaded{ 0 }; // ... and loaded so far
+
+// JFG PORT: material maps decoded by their loading threads, waiting to be uploaded by the renderer. Not members: a
+// loading thread may still finish after the renderer is gone.
+namespace {
+    struct JfgMaterialImage {
+        uint64_t hash = 0;
+        bool specular = false;
+        std::vector<uint8_t> rgba;
+        uint32_t width = 0, height = 0;
+    };
+
+    std::mutex jfgMaterialImageMutex;
+    std::vector<JfgMaterialImage> jfgMaterialImages;
+}
 
 // JFG PORT: the lighting settings that go to the shaders each frame (src/jfg/jfg_lighting.cpp), as floats:
 //   0-2 direction towards the directional light, 3 on (0/1), 4-6 its colour x intensity, 7 how much it lights
 //   characters, 8 surface detail height, 9 shine strength, 10 shine sharpness, 11 how much a shadow takes from the
 //   level's painted glow, 12 share of the surface detail on characters and objects, 13 the directional light casts
-//   shadows (0/1), 14 the size of the area around the view it shadows.
+//   shadows (0/1), 14 the size of the area around the view it shadows, 15 how much authored material maps count.
 static std::mutex jfgParamsMutex;
 static float jfgParams[16] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
@@ -308,6 +330,7 @@ namespace RT64 {
                     gpuTile.flags.rawTMEM = false;
                     gpuTile.flags.hasMipmaps = false;
                     gpuTile.flags.jfgSoft = tileCopy.jfgSmallSource; // JFG PORT
+                    gpuTile.jfgMaterial = 0;
                 }
             }
             else {
@@ -331,6 +354,7 @@ namespace RT64 {
                 gpuTile.flags.hasMipmaps = hasMipmaps;
                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
                 gpuTile.flags.jfgSoft = false; // JFG PORT
+                gpuTile.jfgMaterial = jfgMaterialFor(callTile.tmemHashOrID);
             }
         }
     }
@@ -369,9 +393,31 @@ namespace RT64 {
         assert(worker != nullptr);
         assert(drawBuffers != nullptr);
         
-        const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
+        // JFG PORT: with material maps the set spans the whole array (they sit at its top, JFG_MATERIAL_BASE).
+        const bool jfgMaterials = (rt64_jfg_material_files.load(std::memory_order_relaxed) > 0);
+        const uint32_t jfgSetSize = jfgMaterials ? uint32_t(FramebufferRendererDescriptorTextureSet::UpperRange) : ((textureCacheSize + 1) * 3) / 2;
+        const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1)) ||
+            (jfgMaterials && (descTextureSet->textureCacheSize < uint32_t(FramebufferRendererDescriptorTextureSet::UpperRange)));
         if (createSet) {
-            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
+            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, std::max(jfgSetSize, ((textureCacheSize + 1) * 3) / 2));
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(jfgMaterialMutex);
+            if (createSet) {
+                jfgMaterialPending.clear();
+                for (uint32_t i = 0; i < uint32_t(jfgMaterialTextures.size()); i++) {
+                    jfgMaterialPending.push_back(i);
+                }
+            }
+
+            for (uint32_t slot : jfgMaterialPending) {
+                if ((JFG_MATERIAL_BASE + slot) < descTextureSet->textureCacheSize) {
+                    descTextureSet->setTexture(JFG_MATERIAL_BASE + slot, jfgMaterialTextures[slot]->texture.get(), RenderTextureLayout::SHADER_READ);
+                }
+            }
+
+            jfgMaterialPending.clear();
         }
 
         if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
@@ -2540,7 +2586,7 @@ namespace RT64 {
         }
 
         frame.shadowFade = { fade[0], fade[1], fade[2], fade[3] };
-        frame.extra = { params[12], jfgSunRange, 0.0f, 0.0f };
+        frame.extra = { params[12], jfgSunRange, params[15], 0.0f };
 
         // The directional light's shadow map: a square around where the camera looks ([1] of the frame's points),
         // moved only in whole texels across the light's view so its edges don't crawl as the camera moves.
@@ -2574,6 +2620,8 @@ namespace RT64 {
         if (jfgFrameData.empty()) {
             jfgFrameData.emplace_back(interop::JfgFrame{}); // JFG PORT: the upload needs one
         }
+
+        uploadJfgMaterials(worker); // JFG PORT
 
         bool shaderViewRtEnabled = false;
         std::vector<BufferUploader::Upload> shaderUploads = {
@@ -2645,6 +2693,124 @@ namespace RT64 {
         shaderUploader->submit(worker, shaderUploads);
         jfgShadowIndexView = RenderIndexBufferView(RenderBufferReference(jfgShadowIndicesBuffer.get()), uint32_t(sizeof(uint32_t) * jfgShadowIndices.size()), RenderFormat::R32_UINT); // JFG PORT
         updateShaderViews(worker, drawBuffers, outputBuffers, shaderViewRtEnabled);
+    }
+
+    // JFG PORT: the material maps of a texture (by its hash), as GPUTile::jfgMaterial. The first time, the materials
+    // folder next to the game is listed: <16 hex digits of the hash>_n.png (normal map, tangent space with green up)
+    // and _s.png (specular: red = how strong the shine, green = how sharp). A texture's maps are loaded the first
+    // time it is drawn, by a thread of their own; until they are uploaded the tile has none.
+    uint32_t FramebufferRenderer::jfgMaterialFor(uint64_t hash) {
+        std::lock_guard<std::mutex> lock(jfgMaterialMutex);
+        if (!jfgMaterialsScanned) {
+            jfgMaterialsScanned = true;
+            std::error_code ec;
+            const char *dir = std::getenv("RT64_JFG_MATERIALS");
+            const std::filesystem::path folder = (dir != nullptr) ? std::filesystem::path(dir) : std::filesystem::path("materials");
+            for (std::filesystem::directory_iterator it(folder, ec), end; !ec && (it != end); it.increment(ec)) {
+                const std::string name = it->path().filename().string();
+                if ((name.size() != 22) || (name[16] != '_') || (name.substr(18) != ".png")) {
+                    continue;
+                }
+
+                char *parseEnd = nullptr;
+                const uint64_t fileHash = strtoull(name.substr(0, 16).c_str(), &parseEnd, 16);
+                if ((parseEnd == nullptr) || (*parseEnd != '\0')) {
+                    continue;
+                }
+
+                if ((name[17] == 'n') || (name[17] == 'N')) {
+                    jfgMaterialFiles[fileHash].first = it->path().string();
+                }
+                else if ((name[17] == 's') || (name[17] == 'S')) {
+                    jfgMaterialFiles[fileHash].second = it->path().string();
+                }
+            }
+
+            rt64_jfg_material_files = int(jfgMaterialFiles.size());
+            if (!jfgMaterialFiles.empty()) {
+                fprintf(stderr, "[RT64 JFG] %zu textures have material maps in %s\n", jfgMaterialFiles.size(), folder.string().c_str());
+            }
+        }
+
+        if (jfgMaterialFiles.empty()) {
+            return 0;
+        }
+
+        const auto slots = jfgMaterialSlots.find(hash);
+        if (slots != jfgMaterialSlots.end()) {
+            return slots->second;
+        }
+
+        const auto files = jfgMaterialFiles.find(hash);
+        if ((files == jfgMaterialFiles.end()) || !jfgMaterialRequested.insert(hash).second) {
+            return 0;
+        }
+
+        for (int kind = 0; kind < 2; kind++) {
+            const std::string path = (kind == 0) ? files->second.first : files->second.second;
+            if (path.empty()) {
+                continue;
+            }
+
+            std::thread([hash, kind, path]() {
+                std::ifstream file(std::filesystem::path(path), std::ios::binary);
+                const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                int width = 0, height = 0;
+                stbi_uc *data = bytes.empty() ? nullptr : stbi_load_from_memory(bytes.data(), int(bytes.size()), &width, &height, nullptr, 4);
+                if (data == nullptr) {
+                    fprintf(stderr, "[RT64 JFG] material map %s could not be read\n", path.c_str());
+                    return;
+                }
+
+                JfgMaterialImage image;
+                image.hash = hash;
+                image.specular = (kind == 1);
+                image.width = uint32_t(width);
+                image.height = uint32_t(height);
+                image.rgba.assign(data, data + size_t(width) * size_t(height) * 4);
+                stbi_image_free(data);
+                std::lock_guard<std::mutex> imageLock(jfgMaterialImageMutex);
+                jfgMaterialImages.emplace_back(std::move(image));
+            }).detach();
+        }
+
+        return 0;
+    }
+
+    // JFG PORT: the material maps decoded since the last frame go into textures of their own (recorded on this frame's
+    // command list, before anything is drawn) and get their slots; the descriptor set takes them in
+    // updateShaderDescriptorSet.
+    void FramebufferRenderer::uploadJfgMaterials(RenderWorker *worker) {
+        std::vector<JfgMaterialImage> images;
+        {
+            std::lock_guard<std::mutex> imageLock(jfgMaterialImageMutex);
+            images.swap(jfgMaterialImages);
+        }
+
+        if (images.empty()) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(jfgMaterialMutex);
+        for (const JfgMaterialImage &image : images) {
+            const uint32_t slot = uint32_t(jfgMaterialTextures.size());
+            if (slot >= JFG_MATERIAL_SLOTS) {
+                fprintf(stderr, "[RT64 JFG] more than %d material maps in use: the rest are left out\n", JFG_MATERIAL_SLOTS);
+                break;
+            }
+
+            std::unique_ptr<Texture> texture = std::make_unique<Texture>();
+            std::unique_ptr<RenderBuffer> upload;
+            TextureCache::setRGBA32(texture.get(), worker->device, worker->commandList.get(), image.rgba.data(), image.rgba.size(), image.width, image.height, image.width * 4, upload);
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderTextureBarrier(texture->texture.get(), RenderTextureLayout::SHADER_READ));
+            jfgMaterialTextures.emplace_back(std::move(texture));
+            jfgMaterialUploads.emplace_back(std::move(upload));
+            jfgMaterialPending.push_back(slot);
+            uint32_t &packed = jfgMaterialSlots[image.hash];
+            packed |= image.specular ? ((slot + 1) << 16) : (slot + 1);
+        }
+
+        rt64_jfg_material_loaded = int(jfgMaterialTextures.size());
     }
 
     // JFG PORT: the shadow atlas at the size set (six faces a row, JfgShadowRows rows). A replaced one is kept until

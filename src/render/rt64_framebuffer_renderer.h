@@ -125,6 +125,17 @@ namespace RT64 {
         std::vector<std::unique_ptr<RenderTexture>> jfgShadowRetired;
         std::vector<std::unique_ptr<RenderTextureView>> jfgShadowRetiredViews;
         std::vector<std::unique_ptr<RenderFramebuffer>> jfgShadowRetiredFramebuffers;
+        // JFG PORT: authored material maps (materials/<hash>_n.png, _s.png next to the game): the files found, the
+        // slots of the ones loaded (by texture hash), their textures and upload buffers by slot, and the slots still
+        // to be put in the texture descriptor set.
+        std::mutex jfgMaterialMutex;
+        bool jfgMaterialsScanned = false;
+        std::unordered_map<uint64_t, std::pair<std::string, std::string>> jfgMaterialFiles;
+        std::unordered_map<uint64_t, uint32_t> jfgMaterialSlots;
+        std::unordered_set<uint64_t> jfgMaterialRequested;
+        std::vector<std::unique_ptr<Texture>> jfgMaterialTextures;
+        std::vector<std::unique_ptr<RenderBuffer>> jfgMaterialUploads;
+        std::vector<uint32_t> jfgMaterialPending;
         // JFG PORT: bloom. Two small buffers per bloom-buffer size (kept: sizes rarely change, and a buffer may still
         // be referenced by the command list being recorded), and the descriptor sets made while recording one workload.
         struct BloomBuffers {
@@ -165,6 +176,8 @@ namespace RT64 {
         RenderPipeline *bloomCompositePipeline = nullptr;
         BloomBuffers *getBloomBuffers(RenderWorker *worker, uint32_t width, uint32_t height, bool ssao = false);
         void updateJfgShadowAtlas(RenderWorker *worker); // JFG PORT
+        uint32_t jfgMaterialFor(uint64_t hash); // JFG PORT: a texture's material map slots for its GPU tile
+        void uploadJfgMaterials(RenderWorker *worker); // JFG PORT
         void recordJfgShadows(RenderWorker *worker); // JFG PORT
         RenderDescriptorSet *makeBloomDescriptorSet(RenderWorker *worker, RenderTexture *texture, RenderTextureView *textureView);
         std::unique_ptr<FramebufferRendererDescriptorCommonSet> descCommonSet;

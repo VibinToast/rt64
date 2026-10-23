@@ -6,6 +6,11 @@
 
 #include "shared/rt64_hlsl.h"
 
+// JFG PORT: authored material maps (normal, specular) live at the top of the texture array, from this index on
+// (FramebufferRenderer::jfgMaterialFor); GPUTile::jfgMaterial = normal slot + 1 | (specular slot + 1) << 16.
+#define JFG_MATERIAL_BASE 7680
+#define JFG_MATERIAL_SLOTS 512
+
 #ifdef HLSL_CPU
 namespace interop {
 #endif
@@ -63,6 +68,7 @@ namespace interop {
         uint textureIndex;
         float3 textureDimensions;
         GPUTileFlags flags;
+        uint jfgMaterial; // JFG PORT: see JFG_MATERIAL_BASE (0 = none)
     };
 #ifdef HLSL_CPU
 };
