@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <thread>
 #include <unordered_set>
@@ -137,6 +138,52 @@ uint32_t rt64_jfg_material_kinds(uint64_t hash) {
 
 void rt64_jfg_material_rescan() {
     jfgMaterialRescan.store(true);
+}
+
+// JFG PORT: a small copy (at most 256 on a side) of every material map decoded, for the lighting tool's Textures tab
+// (rt64_jfg_material_preview). At most 96 kept.
+namespace {
+    struct JfgMapPreview {
+        uint32_t width = 0, height = 0;
+        std::vector<uint8_t> rgba;
+    };
+
+    std::mutex jfgMapPreviewMutex;
+    std::map<std::pair<uint64_t, int>, JfgMapPreview> jfgMapPreviews;
+
+    void jfgKeepMapPreview(uint64_t hash, int kind, const uint8_t *rgba, uint32_t width, uint32_t height) {
+        const uint32_t step = std::max(1U, (std::max(width, height) + 255) / 256);
+        JfgMapPreview preview;
+        preview.width = width / step;
+        preview.height = height / step;
+        preview.rgba.resize(size_t(preview.width) * preview.height * 4);
+        for (uint32_t y = 0; y < preview.height; y++) {
+            for (uint32_t x = 0; x < preview.width; x++) {
+                memcpy(&preview.rgba[(size_t(y) * preview.width + x) * 4], &rgba[(size_t(y * step) * width + x * step) * 4], 4);
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(jfgMapPreviewMutex);
+        if ((jfgMapPreviews.size() >= 96) && (jfgMapPreviews.find({ hash, kind }) == jfgMapPreviews.end())) {
+            jfgMapPreviews.erase(jfgMapPreviews.begin());
+        }
+
+        jfgMapPreviews[{ hash, kind }] = std::move(preview);
+    }
+}
+
+// A material map's small copy (kind 0 normal, 1 specular, 2 emission) once it has been decoded; false until then.
+bool rt64_jfg_material_preview(uint64_t hash, int kind, uint32_t *width, uint32_t *height, std::vector<uint8_t> &rgba) {
+    std::lock_guard<std::mutex> lock(jfgMapPreviewMutex);
+    const auto it = jfgMapPreviews.find({ hash, kind });
+    if (it == jfgMapPreviews.end()) {
+        return false;
+    }
+
+    *width = it->second.width;
+    *height = it->second.height;
+    rgba = it->second.rgba;
+    return true;
 }
 
 bool rt64_jfg_emission_colour(uint64_t hash, float *rgb) {
@@ -2929,6 +2976,7 @@ namespace RT64 {
                 image.height = uint32_t(height);
                 image.rgba.assign(data, data + size_t(width) * size_t(height) * 4);
                 stbi_image_free(data);
+                jfgKeepMapPreview(hash, kind, image.rgba.data(), image.width, image.height);
                 if (kind == 2) {
                     double sum[3] = { 0.0, 0.0, 0.0 };
                     const size_t pixels = size_t(width) * size_t(height);
