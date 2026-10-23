@@ -119,6 +119,16 @@ namespace {
     std::atomic<bool> jfgMaterialRescan{ false };
 }
 
+// JFG PORT: the texture the lighting tool's picker shows or has selected (its hash, 0 = none) and how bright its pulse
+// is now (0-1), set by the port every tick.
+std::atomic<uint64_t> rt64_jfg_highlight_hash{ 0 };
+std::atomic<float> rt64_jfg_highlight_amount{ 0.0f };
+
+void rt64_jfg_highlight(uint64_t hash, float amount) {
+    rt64_jfg_highlight_hash.store(hash, std::memory_order_relaxed);
+    rt64_jfg_highlight_amount.store(amount, std::memory_order_relaxed);
+}
+
 uint32_t rt64_jfg_material_kinds(uint64_t hash) {
     std::lock_guard<std::mutex> lock(jfgMaterialKindsMutex);
     const auto it = jfgMaterialKinds.find(hash);
@@ -369,6 +379,7 @@ namespace RT64 {
                     gpuTile.flags.rawTMEM = false;
                     gpuTile.flags.hasMipmaps = false;
                     gpuTile.flags.jfgSoft = tileCopy.jfgSmallSource; // JFG PORT
+                    gpuTile.flags.jfgHighlight = false;
                     gpuTile.jfgMaterial = 0;
                 }
             }
@@ -393,6 +404,7 @@ namespace RT64 {
                 gpuTile.flags.hasMipmaps = hasMipmaps;
                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
                 gpuTile.flags.jfgSoft = false; // JFG PORT
+                gpuTile.flags.jfgHighlight = (callTile.tmemHashOrID != 0) && (callTile.tmemHashOrID == rt64_jfg_highlight_hash.load(std::memory_order_relaxed));
                 gpuTile.jfgMaterial = jfgMaterialFor(callTile.tmemHashOrID, textureCache);
             }
         }
@@ -2649,7 +2661,7 @@ namespace RT64 {
         }
 
         frame.sunShadow = jfgSunShadow;
-        frame.characters = { params[17], params[18], params[19], 0.0f };
+        frame.characters = { params[17], params[18], params[19], rt64_jfg_highlight_amount.load(std::memory_order_relaxed) };
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());

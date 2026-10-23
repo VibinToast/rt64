@@ -43,7 +43,8 @@ namespace interop {
                             // w = the level's smooth surface directions on (0/1)
         float4 sunShadow;   // xyz = centre of the directional light's shadow map, w = its half size (0 = none)
         float4 characters;  // x = shine strength on characters and objects, y = its sharpness, z = how bright
-                            // emission maps shine (0 = off)
+                            // emission maps shine (0 = off), w = how bright the lighting tool's highlighted texture
+                            // pulses now (0-1)
     };
 #ifdef HLSL_CPU
 };

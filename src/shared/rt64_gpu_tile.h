@@ -25,6 +25,7 @@ namespace interop {
             uint hasMipmaps : 1;
             uint shiftedByHalf : 1;
             uint jfgSoft : 1; // JFG PORT: a copy of a small framebuffer, sampled with a soft edge (TextureSampler.hlsli)
+            uint jfgHighlight : 1; // JFG PORT: the texture the lighting tool shows pulses (rt64_jfg_highlight)
         };
 
         uint value;
@@ -59,6 +60,10 @@ namespace interop {
 
     bool gpuTileFlagJfgSoft(GPUTileFlags flags) {
         return flags & 0x40;
+    }
+
+    bool gpuTileFlagJfgHighlight(GPUTileFlags flags) {
+        return flags & 0x80;
     }
 #endif
     struct GPUTile {

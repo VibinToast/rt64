@@ -334,6 +334,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     bool jfgHasNormalMap = false;
     bool jfgHasSpecularMap = false;
     float3 jfgEmission = float3(0.0f, 0.0f, 0.0f); // the light it gives off: its emission map
+    bool jfgHighlight = false; // the lighting tool's picked or selected texture
     const bool jfgDetailOn = (jfgFrame[0].material.x > 0.0f) &&
         (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && jfgCharacter));
     float2 jfgTexGrad = float2(0.0f, 0.0f);
@@ -349,6 +350,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
+        jfgHighlight = gpuTileFlagJfgHighlight(gpuTile.flags);
         if ((gpuTile.jfgMaterial != 0) && (jfgFrame[0].extra.z > 0.0f)) {
             const uint normalSlot = gpuTile.jfgMaterial & 0x3FF;
             const uint specularSlot = (gpuTile.jfgMaterial >> 10) & 0x3FF;
@@ -580,6 +582,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     resultColor = Blender::run(otherMode, rp.flags, blInputs, combinerColor, false);
     resultColor.rgb += jfgSpecular; // JFG PORT: shine goes on top of the texture, not into it
     resultColor.rgb += jfgEmission * jfgFrame[0].characters.z; // JFG PORT: ... and so does an emission map's light
+    if (jfgHighlight) { // JFG PORT: the lighting tool's picked or selected texture pulses brighter
+        resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 1.0f, 1.0f), jfgFrame[0].characters.w * 0.75f);
+    }
     resultAlpha = 1.0f;
     
     // When using alpha blending, we store the blending factor into the dedicated output so the main one can be used for coverage.
