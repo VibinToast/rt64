@@ -32,6 +32,8 @@
 #endif
 
 namespace RT64 {
+    struct JfgMaterialQueue; // JFG PORT: a renderer's decoded material maps waiting for upload (the .cpp)
+
     struct DynamicTextureView {
         const RenderTexture *texture = nullptr;
         uint32_t dstIndex = 0;
@@ -136,6 +138,7 @@ namespace RT64 {
         };
 
         std::mutex jfgMaterialMutex;
+        std::shared_ptr<JfgMaterialQueue> jfgMaterialQueue; // its own: there is more than one renderer
         bool jfgMaterialsScanned = false;
         std::vector<const FileSystem *> jfgMaterialPacks;
         std::unordered_map<uint64_t, JfgMaterialFile> jfgMaterialFiles;

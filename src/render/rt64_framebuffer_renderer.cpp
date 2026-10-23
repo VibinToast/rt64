@@ -92,8 +92,10 @@ std::atomic<int> rt64_jfg_shadow_size{ 512 };  // each shadow map face's size in
 std::atomic<int> rt64_jfg_material_files{ 0 };  // material maps found in materials/ (for the port's lighting tool)
 std::atomic<int> rt64_jfg_material_loaded{ 0 }; // ... and loaded so far
 
-// JFG PORT: material maps decoded by their loading threads, waiting to be uploaded by the renderer. Not members: a
-// loading thread may still finish after the renderer is gone.
+// JFG PORT: material maps decoded by their loading threads, waiting to be uploaded by the renderer that asked for them
+// (RT64 has more than one renderer, each with its own slots and descriptor set: one shared queue let one renderer take
+// the maps another asked for, which then never got them). Shared with the threads: one may finish after the renderer
+// is gone.
 namespace {
     struct JfgMaterialImage {
         uint64_t hash = 0;
@@ -102,8 +104,6 @@ namespace {
         uint32_t width = 0, height = 0;
     };
 
-    std::mutex jfgMaterialImageMutex;
-    std::vector<JfgMaterialImage> jfgMaterialImages;
 
     // JFG PORT: each emission map's average colour (0-1, black included), for the lights the port places where the
     // textures are (rt64_jfg_emission_colour).
@@ -170,6 +170,11 @@ std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
 std::atomic<float> rt64_jfg_vignette_size{ 0.45f };
 
 namespace RT64 {
+    struct JfgMaterialQueue { // JFG PORT: see JfgMaterialImage
+        std::mutex mutex;
+        std::vector<JfgMaterialImage> images;
+    };
+
     // Helper functions.
     
     RenderRect convertFixedRect(FixedRect rect, hlslpp::float2 resScale, int32_t fbWidth, float aspectRatioScale, float extOriginPercentage, int32_t horizontalMisalignment, uint16_t leftOrigin, uint16_t rightOrigin) {
@@ -262,6 +267,7 @@ namespace RT64 {
     
     FramebufferRenderer::FramebufferRenderer(RenderWorker *worker, bool rtSupport, UserConfiguration::GraphicsAPI graphicsAPI, const ShaderLibrary *shaderLibrary) {
         assert(worker != nullptr);
+        jfgMaterialQueue = std::make_shared<JfgMaterialQueue>(); // JFG PORT
 
         this->shaderLibrary = shaderLibrary;
 
@@ -2889,7 +2895,7 @@ namespace RT64 {
             }
 
             const std::string path = file.path[kind];
-            std::thread([hash, kind, path, bytes = std::move(bytes)]() mutable {
+            std::thread([hash, kind, path, bytes = std::move(bytes), queue = jfgMaterialQueue]() mutable {
                 if (bytes.empty()) {
                     std::ifstream stream(std::filesystem::path(path), std::ios::binary);
                     bytes.assign((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
@@ -2923,8 +2929,8 @@ namespace RT64 {
                     jfgEmissionColours[hash] = { float(sum[0] * scale), float(sum[1] * scale), float(sum[2] * scale) };
                 }
 
-                std::lock_guard<std::mutex> imageLock(jfgMaterialImageMutex);
-                jfgMaterialImages.emplace_back(std::move(image));
+                std::lock_guard<std::mutex> imageLock(queue->mutex);
+                queue->images.emplace_back(std::move(image));
             }).detach();
         }
 
@@ -2937,8 +2943,8 @@ namespace RT64 {
     void FramebufferRenderer::uploadJfgMaterials(RenderWorker *worker) {
         std::vector<JfgMaterialImage> images;
         {
-            std::lock_guard<std::mutex> imageLock(jfgMaterialImageMutex);
-            images.swap(jfgMaterialImages);
+            std::lock_guard<std::mutex> imageLock(jfgMaterialQueue->mutex);
+            images.swap(jfgMaterialQueue->images);
         }
 
         if (images.empty()) {
@@ -2961,7 +2967,10 @@ namespace RT64 {
             jfgMaterialUploads.emplace_back(std::move(upload));
             jfgMaterialPending.push_back(slot);
             uint32_t &packed = jfgMaterialSlots[image.hash];
-            packed |= (slot + 1) << (10 * image.kind);
+            // A map loaded again (the folder or the packs scanned again while it was on its way) takes the place of the
+            // one before: the kind's 10 bits are replaced, not combined.
+            const uint32_t shift = 10 * uint32_t(image.kind);
+            packed = (packed & ~(0x3FFU << shift)) | ((slot + 1) << shift);
             if (getenv("RT64_JFG_MATERIAL_LOG") != nullptr) {
                 fprintf(stderr, "[RT64 JFG] material map %016llX kind %d in slot %u\n", (unsigned long long)image.hash, image.kind, slot);
             }

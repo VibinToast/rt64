@@ -413,6 +413,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     const float jfgShineStrengthChar = jfgHasSpecularMap ? jfgShineStrength : (jfgF.characters.x * lerp(0.25f, 1.0f, jfgTexLum));
     const float jfgSharpnessChar = jfgHasSpecularMap ? jfgSharpness : max(jfgF.characters.y, 1.0f);
     float3 jfgSpecular = float3(0.0f, 0.0f, 0.0f);
+    float3 jfgShadedNormal = jfgNormal; // the direction the lights saw, bumps included (the debug view)
 
     // Color combiner.
     float4 shadeColor = vertexColor;
@@ -429,6 +430,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const float3 n = normalize(vertexWorldNorm.xyz);
         const float3 nb = jfgHasNormalMap ? jfgMappedNormal(n, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.maps.x)
             : jfgDetailNormal(n, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight * jfgF.extra.x); // their own share
+        jfgShadedNormal = nb;
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         // The first setting is the level's own light (its ambient and one direction, from the level header), so the
@@ -484,6 +486,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const float ambient = float(gConstants.padding.x >> 24) / 128.0f; // the level's own colours are its ambient light
         const float3 nb = jfgHasNormalMap ? jfgMappedNormal(jfgNormal, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.maps.x)
             : jfgDetailNormal(jfgNormal, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight);
+        jfgShadedNormal = nb;
         float3 added = float3(0.0f, 0.0f, 0.0f);
         float painted = 1.0f; // how much of the level's own colours a shadow (and the detail) leaves
         for (uint i = 0; i < lightCount; i++) {
@@ -629,9 +632,14 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         resultColor.rgb = (vertexWorldPos.w > 0.5f) ? frac(vertexWorldPos.xyz / 256.0f) : float3(1.0f, 0.0f, 1.0f);
     }
 
-    // JFG PORT: the surface direction as colour (x red, y green, z blue; up is green), magenta without a position.
+    // JFG PORT: the surface direction as colour (x red, y green, z blue; up is green), magenta without a position: the
+    // one the lights saw, with a normal map's or the surface detail's bumps; a texture with a normal map is shown
+    // brighter in its top-left quarter of each 8 x 8 pixel block, so which surfaces use one can be told apart.
     if (gConstants.padding.x & RASTER_JFG_DEBUG_NORMAL) {
-        resultColor.rgb = (vertexWorldPos.w > 0.5f) ? (jfgNormal * 0.5f + 0.5f) : float3(1.0f, 0.0f, 1.0f);
+        resultColor.rgb = (vertexWorldPos.w > 0.5f) ? (jfgShadedNormal * 0.5f + 0.5f) : float3(1.0f, 0.0f, 1.0f);
+        if (jfgHasNormalMap && all((uint2(vertexPosition.xy) & 7u) < 2u)) {
+            resultColor.rgb = float3(1.0f, 1.0f, 1.0f);
+        }
     }
 
     // JFG PORT: the lights' shadows as red, at full darkness, from every light that reaches the surface and from the
