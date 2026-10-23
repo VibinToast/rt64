@@ -74,6 +74,7 @@ std::atomic<float> rt64_jfg_fog_density{ 0.5f };
 std::atomic<uint32_t> rt64_jfg_fog_color{ 0xA0B4C8u }; // 0xRRGGBB
 std::atomic<int> rt64_jfg_vignette{ 0 };       // vignette (VignettePS.hlsl)
 std::atomic<int> rt64_jfg_pixel_lights{ 0 };   // the game's lights on the level per pixel (RasterPS, src/jfg/jfg_lighting.cpp)
+std::atomic<int> rt64_jfg_debug_world{ 0 };    // show the world position as colour (RasterPS; F9 Lighting tab, RT64_JFG_DEBUG_WORLD)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
 std::atomic<float> rt64_jfg_vignette_size{ 0.45f };
 
@@ -509,7 +510,7 @@ namespace RT64 {
         const RenderPipeline *previousPipeline = nullptr;
         RenderRect previousScissor;
         interop::RasterParams rasterParams = {};
-        static const bool jfgDebugWorld = std::getenv("RT64_JFG_DEBUG_WORLD") != nullptr; // JFG PORT: see RasterPS
+        const bool jfgDebugWorld = rt64_jfg_debug_world.load(std::memory_order_relaxed) != 0; // JFG PORT: see RasterPS
         const bool jfgPixelLights = (rt64_jfg_pixel_lights.load(std::memory_order_relaxed) != 0) && (jfgLightCount > 0);
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
