@@ -2522,6 +2522,7 @@ namespace RT64 {
             dst.posRadius = { l.position.x - l.direction.x * back, l.position.y - l.direction.y * back, l.position.z - l.direction.z * back,
                 l.attenuationRadius };
             dst.colorInner = { l.diffuseColor.x, l.diffuseColor.y, l.diffuseColor.z, l.pointRadius };
+            dst.shadow = { 0.0f, 0.0f, 0.0f, (l.groupBits & 1U) ? 1.0f : 0.0f }; // w: casts no shadows
             jfgLights.emplace_back(dst);
         }
 
@@ -2550,8 +2551,9 @@ namespace RT64 {
         float shadowDistance[JfgShadowRows] = {};
         float nextDistance = -1.0f;
         for (interop::JfgLight &light : jfgLights) {
+            const bool noShadows = float(light.shadow.w) > 0.5f; // set by the lighting tool
             light.shadow = { 0.0f, 0.0f, 0.0f, 0.0f };
-            if (float(light.posRadius.w) <= 1.0f) {
+            if ((float(light.posRadius.w) <= 1.0f) || noShadows) {
                 continue;
             }
 

@@ -120,7 +120,7 @@ void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) 
     current.clear();
     frame->lights.clear();
     for (uint32_t i = 0; i < count; i++) {
-        const float *l = &data[i * 9];
+        const float *l = &data[i * 10];
         uint32_t id;
         memcpy(&id, &l[8], sizeof(id));
         interop::PointLight light = {};
@@ -129,6 +129,7 @@ void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) 
         light.pointRadius = l[4];
         light.diffuseColor = { l[5], l[6], l[7] };
         light.attenuationExponent = 1.0f; // linear, as the game's own falloff
+        light.groupBits = (l[9] > 0.5f) ? 1U : 0U; // 1: casts no shadows (setJfgLights)
         jfgTrackMoves(previous, current, id, light);
         frame->lights.emplace_back(light);
     }

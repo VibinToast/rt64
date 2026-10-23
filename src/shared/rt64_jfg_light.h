@@ -16,6 +16,7 @@ namespace interop {
         float4 posRadius;   // xyz = position, w = radius
         float4 colorInner;  // rgb = colour, w = inner radius
         float4 shadow;      // x = its tile row in the shadow map atlas + 1 (0 = casts no shadows), y = near, z = far
+                            // (w, only in setJfgLights: 1 = set not to cast shadows)
     };
 
     // JFG PORT: how the game lights one character or object this frame (its ObjectLighting, read by the port at
