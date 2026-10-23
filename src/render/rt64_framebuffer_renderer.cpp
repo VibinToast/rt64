@@ -110,7 +110,7 @@ namespace {
 //   characters, 8 surface detail height, 9 shine strength, 10 shine sharpness, 11 how much a shadow takes from the
 //   level's painted glow, 12 share of the surface detail on characters and objects, 13 the directional light casts
 //   shadows (0/1), 14 the size of the area around the view it shadows, 15 how much authored material maps count,
-//   16 the level's smooth surface directions on (0/1).
+//   16 the level's smooth surface directions on (0/1), 17 shine strength on characters, 18 its sharpness.
 static std::mutex jfgParamsMutex;
 static float jfgParams[20] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
@@ -2612,6 +2612,7 @@ namespace RT64 {
         }
 
         frame.sunShadow = jfgSunShadow;
+        frame.characters = { params[17], params[18], 0.0f, 0.0f };
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());

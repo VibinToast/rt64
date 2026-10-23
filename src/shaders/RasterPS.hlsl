@@ -401,6 +401,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // texture's brightness with the settings' strength and sharpness.
     const float jfgShineStrength = jfgHasSpecularMap ? (jfgSpecularMap.r * 2.0f * jfgF.extra.z) : (jfgF.material.y * lerp(0.25f, 1.0f, jfgTexLum));
     const float jfgSharpness = jfgHasSpecularMap ? exp2(lerp(1.0f, 8.0f, jfgSpecularMap.g)) : max(jfgF.material.z, 1.0f);
+    // ... and on characters and objects, with their own strength and sharpness (a specular map still decides).
+    const float jfgShineStrengthChar = jfgHasSpecularMap ? jfgShineStrength : (jfgF.characters.x * lerp(0.25f, 1.0f, jfgTexLum));
+    const float jfgSharpnessChar = jfgHasSpecularMap ? jfgSharpness : max(jfgF.characters.y, 1.0f);
     float3 jfgSpecular = float3(0.0f, 0.0f, 0.0f);
 
     // Color combiner.
@@ -430,13 +433,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             const float shadow = (object.positions[k].w > 0.5f) ? jfgShadowAt(vertexWorldPos.xyz, n, object.positions[k].xyz, lightCount, darkness) : 1.0f;
             const float3 light = object.colors[k].rgb * object.dirs[k].w * scale * shadow;
             brightness += light * saturate(dot(nb, dir));
-            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, dir, light, jfgShineStrength, jfgSharpness);
+            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, dir, light, jfgShineStrengthChar, jfgSharpnessChar);
         }
 
         if (jfgF.sunDir.w > 0.5f) {
             const float3 sun = jfgF.sunColor.rgb * jfgF.sunColor.w * jfgSunVisibility(vertexWorldPos.xyz, n, darkness);
             brightness += sun * saturate(dot(nb, jfgF.sunDir.xyz));
-            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
+            jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrengthChar, jfgSharpnessChar);
         }
 
         float3 added = float3(0.0f, 0.0f, 0.0f);
@@ -455,7 +458,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
                     const float visibility = jfgShadowVisibility(vertexWorldPos.xyz, n, light, darkness);
                     const float3 lit = light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * visibility;
                     added += lit * lerp(1.0f, towards, facing);
-                    jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, l, lit * share, jfgShineStrength, jfgSharpness);
+                    jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, l, lit * share, jfgShineStrengthChar, jfgSharpnessChar);
                 }
             }
         }
