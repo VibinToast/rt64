@@ -38,6 +38,59 @@
 std::atomic<uint32_t> rt64_jfg_screen_fb{ 0 };
 std::atomic<uint32_t> rt64_jfg_screen_updates{ 0 };
 
+// JFG PORT: glowing textures (src/jfg/jfg_lighting_tool.cpp, the Glow tab): the memory the marked textures load from,
+// as physical [start, end) ranges with a strength (1-255) each. Every texture loaded while there are any is noted
+// with the address it was loaded from (State::fullSyncFramebufferPairTiles), so a tile finds its glow by its hash
+// (FramebufferRenderer::createGPUTiles) whenever the marks change, without loading the texture again.
+namespace {
+    constexpr uint32_t JfgGlowAddressMask = 0x007FFFFF;
+    std::mutex jfgGlowMutex;
+    std::vector<uint32_t> jfgGlowRanges;
+    std::unordered_map<uint64_t, uint32_t> jfgGlowAddresses;
+    std::atomic<bool> jfgGlowAny{ false };
+}
+
+void rt64_jfg_glow_ranges(const uint32_t *ranges, uint32_t count) {
+    std::lock_guard<std::mutex> lock(jfgGlowMutex);
+    jfgGlowRanges.assign(ranges, ranges + count * 3);
+    jfgGlowAny.store(count > 0, std::memory_order_relaxed);
+}
+
+void rt64_jfg_glow_note(uint64_t hash, uint32_t address) {
+    if ((hash == 0) || !jfgGlowAny.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(jfgGlowMutex);
+    if (jfgGlowAddresses.size() > 65536) {
+        jfgGlowAddresses.clear();
+    }
+
+    jfgGlowAddresses[hash] = address & JfgGlowAddressMask;
+}
+
+// A texture's glow (0-255) by its hash.
+uint32_t rt64_jfg_glow_for(uint64_t hash) {
+    if (!jfgGlowAny.load(std::memory_order_relaxed)) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(jfgGlowMutex);
+    const auto it = jfgGlowAddresses.find(hash);
+    if (it == jfgGlowAddresses.end()) {
+        return 0;
+    }
+
+    uint32_t glow = 0;
+    for (size_t i = 0; (i + 2) < jfgGlowRanges.size(); i += 3) {
+        if ((it->second >= jfgGlowRanges[i]) && (it->second < jfgGlowRanges[i + 1])) {
+            glow = std::max(glow, std::min(jfgGlowRanges[i + 2], 255U));
+        }
+    }
+
+    return glow;
+}
+
 // JFG PORT: the game's dynamic lights (its track lights: muzzle flashes, lamps, glowing pickups) for each frame, keyed
 // by the address of the frame's display list (src/jfg/jfg_lighting.cpp sends them when the game submits it). The game
 // double-buffers its display lists and waits for one to finish before building into it again, so a few slots are
@@ -999,6 +1052,9 @@ namespace RT64 {
                 else {
                     callTile.tmemHashOrID = textureManager.uploadTexture(this, callTile.loadTile, ext.textureCache, workload.submissionFrame, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut);
                 }
+
+                // JFG PORT: where the texture was loaded from, for glowing textures (rt64_jfg_glow_ranges).
+                rt64_jfg_glow_note(callTile.tmemHashOrID, rdp->rice.lastLoadOpByTMEM[callTile.loadTile.tmem].texture.address);
             }
             else if (callTile.reinterpretTile) {
                 struct ReinterpretHashData {
