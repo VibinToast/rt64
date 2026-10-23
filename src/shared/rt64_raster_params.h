@@ -12,6 +12,7 @@
 // (RT64_JFG_DEBUG_WORLD).
 #define RASTER_JFG_INDEXED      0x1
 #define RASTER_JFG_DEBUG_WORLD  0x2
+#define RASTER_JFG_LEVEL        0x4 // the level's own geometry: light it per pixel with padding.y of the frame's lights
 
 #ifdef HLSL_CPU
 namespace interop {

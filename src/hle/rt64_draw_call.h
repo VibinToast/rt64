@@ -112,6 +112,7 @@ namespace RT64 {
         DrawExtendedType extendedType;
         DrawExtendedData extendedData;
         DrawExtendedFlags extendedFlags;
+        bool jfgLevel; // JFG PORT: the level's own geometry (RSP::DKR.jfgLevel), for the per-pixel level lighting
 
         // Raytracing parameters.
         // TODO: This is likely better pushed elsewhere and using an index

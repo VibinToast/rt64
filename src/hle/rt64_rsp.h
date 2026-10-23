@@ -218,6 +218,9 @@ namespace RT64 {
             // this on in-between frames (uls/ult, quarter texels).
             bool jfgShadow = false;
             float jfgShadowUls = 0.0f, jfgShadowUlt = 0.0f;
+            // JFG PORT: the vertices loaded last come from the level's own geometry (rt64_jfg_level_vertices); its draws
+            // get the per-pixel level lighting.
+            bool jfgLevel = false;
             hlslpp::float4x4 jfgViewProj;
             hlslpp::float4x4 jfgInvViewProj;
             hlslpp::float4x4 jfgView;

@@ -13,6 +13,7 @@
 #include "preset/rt64_preset_scene.h"
 #include "shared/rt64_frame_params.h"
 #include "shared/rt64_gpu_tile.h"
+#include "shared/rt64_jfg_light.h"
 #include "shared/rt64_render_indices.h"
 #include "shared/rt64_render_params.h"
 
@@ -82,6 +83,11 @@ namespace RT64 {
         BufferPair renderIndicesBuffer;
         BufferPair interleavedRastersBuffer;
         uint32_t interleavedRastersCount = 0;
+        // JFG PORT: the frame's lights for the per-pixel level lighting (setJfgLights, RasterPS); never empty for the
+        // upload, jfgLightCount is how many are real.
+        std::vector<interop::JfgLight> jfgLights;
+        uint32_t jfgLightCount = 0;
+        BufferPair jfgLightsBuffer;
         BufferPair frameParamsBuffer;
         RenderPipelineLayout *rendererPipelineLayout = nullptr;
         RenderPipeline *postBlendDitherNoiseAddPipeline = nullptr;
@@ -211,6 +217,7 @@ namespace RT64 {
         void submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState);
         void addFramebuffer(const DrawParams &p);
         void endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled);
+        void setJfgLights(const std::vector<interop::PointLight> &lights); // JFG PORT: before endFramebuffers
         void recordSetup(RenderWorker *worker, std::vector<BufferUploader *> bufferUploaders, RSPProcessor *rspProcessor, VertexProcessor *vertexProcessor, const OutputBuffers *outputBuffers, bool rtEnabled);
         void recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex);
         void waitForUploaders();

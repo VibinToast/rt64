@@ -333,6 +333,7 @@ namespace RT64 {
         drawCall.NoN = false;
         drawCall.extendedType = DrawExtendedType::None;
         drawCall.extendedFlags = {};
+        drawCall.jfgLevel = false; // JFG PORT
         drawCall.drawStatusChanges = 0;
 
         // Mark everything as changed so everything on the draw call gets updated.
@@ -655,6 +656,7 @@ namespace RT64 {
 
         if (drawStatus.isChanged(DrawAttribute::ExtendedFlags)) {
             drawCall.extendedFlags = rdp->extended.drawExtendedFlags;
+            drawCall.jfgLevel = rsp->DKR.jfg && rsp->DKR.jfgLevel; // JFG PORT: changes flag ExtendedFlags too
         }
 
         drawStatus.clearChanges();
@@ -1848,6 +1850,7 @@ namespace RT64 {
                 }
 
                 // Record all setup previous to drawing any of the recorded framebuffers.
+                framebufferRenderer->setJfgLights(workload.pointLights); // JFG PORT
                 framebufferRenderer->endFramebuffers(ext.framebufferGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, false);
                 framebufferRenderer->recordSetup(ext.framebufferGraphicsWorker, bufferUploaders, queuedProcessor, nullptr, &workload.outputBuffers, false);
 

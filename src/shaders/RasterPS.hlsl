@@ -4,6 +4,7 @@
 
 #include "shared/rt64_blender.h"
 #include "shared/rt64_color_combiner.h"
+#include "shared/rt64_jfg_light.h"
 #include "shared/rt64_raster_params.h"
 
 #include "Depth.hlsli"
@@ -13,6 +14,9 @@
 #include "TextureSampler.hlsli"
 
 [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
+
+// JFG PORT: the frame's lights for the per-pixel level lighting (FramebufferRenderer::setJfgLights), padding.y of them.
+StructuredBuffer<JfgLight> jfgLights : register(t69, space0);
 
 #if defined(MULTISAMPLING)
 Texture2DMS<float> gBackgroundDepth : register(t2, space3);
@@ -164,6 +168,24 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     
     // Color combiner.
     float4 shadeColor = vertexColor;
+
+    // JFG PORT: the game's dynamic lights on the level, per pixel. The game adds them to the level's vertex colours on
+    // the CPU (trackLightAsm, skipped while this is on), so they go into the shade colour here, before the combiner
+    // multiplies it with the texture: full strength within the inner radius, linear to nothing at the radius.
+    if ((gConstants.padding.x & RASTER_JFG_LEVEL) && (vertexWorldPos.w > 0.5f)) {
+        float3 added = float3(0.0f, 0.0f, 0.0f);
+        for (uint i = 0; i < gConstants.padding.y; i++) {
+            const JfgLight light = jfgLights[i];
+            const float radius = light.posRadius.w;
+            const float d = distance(vertexWorldPos.xyz, light.posRadius.xyz);
+            if (d < radius) {
+                const float inner = min(light.colorInner.w, radius - 1.0f);
+                added += light.colorInner.rgb * saturate((radius - d) / (radius - inner));
+            }
+        }
+
+        shadeColor.rgb = saturate(shadeColor.rgb + added);
+    }
     float4 combinerColor;
     float alphaCompareValue;
     ColorCombiner::Inputs ccInputs;

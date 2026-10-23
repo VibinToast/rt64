@@ -46,6 +46,7 @@ namespace RT64 {
                 float jfgTanHalfFovY;
                 float jfgNear;
                 float jfgFar;
+                bool jfgLevel; // JFG PORT: the level's own geometry (DrawCall::jfgLevel): gets the per-pixel level lighting
             } triangles;
 
             struct {

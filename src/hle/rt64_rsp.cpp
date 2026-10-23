@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <vector>
 
 #include "../include/rt64_extended_gbi.h"
 #include "common/rt64_common.h"
@@ -80,6 +82,30 @@ static bool jfgMatrixModel(uint32_t address, hlslpp::float4x4 &model) {
 }
 
 // The tag's ID, and its model matrix in model (hasModel), for a slot load from this address.
+// JFG PORT: the level's own vertex arrays (its track segments, both copies when the game's lighting double-buffers
+// them), sent by the game every frame (src/jfg/jfg_lighting.cpp) as physical [start, end) pairs. Draws whose vertices
+// come from there get the per-pixel level lighting; characters and objects are lit by the game on the CPU instead.
+namespace {
+    std::mutex jfgLevelMutex;
+    std::vector<uint32_t> jfgLevelRanges;
+}
+
+void rt64_jfg_level_vertices(const uint32_t *ranges, uint32_t count) {
+    std::lock_guard<std::mutex> lock(jfgLevelMutex);
+    jfgLevelRanges.assign(ranges, ranges + count * 2);
+}
+
+static bool jfgIsLevelVertex(uint32_t address) {
+    std::lock_guard<std::mutex> lock(jfgLevelMutex);
+    for (size_t i = 0; (i + 1) < jfgLevelRanges.size(); i += 2) {
+        if ((address >= jfgLevelRanges[i]) && (address < jfgLevelRanges[i + 1])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // JFG PORT: the bone buffers of the object being drawn, tagged by the game (src/jfg/jfg_interpolation.cpp) with the
 // object's ID. A model's bones are multiplied from the buffer the game's G_DMAOFFSETS points at.
 namespace {
@@ -236,6 +262,7 @@ namespace RT64 {
         DKR.vertexCursor = 0;
         DKR.billboard = false;
         DKR.jfgSplit = false; // JFG PORT
+        DKR.jfgLevel = false;
         DKR.jfgIds.fill(0);
         DKR.jfgHasModel.fill(false);
         DKR.jfgObjectId = 0;
@@ -934,6 +961,13 @@ namespace RT64 {
         }
 
         const uint32_t rdramAddress = maskPhysicalAddress<0x00FFFFF8>(DKR.vertexOffset + fromSegmented(address)) + sourceOffset;
+        if (DKR.jfg) { // JFG PORT: level geometry or not (see rt64_jfg_level_vertices)
+            const bool level = jfgIsLevelVertex(rdramAddress);
+            if (level != DKR.jfgLevel) {
+                DKR.jfgLevel = level;
+                state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
+            }
+        }
         for (uint32_t i = 0; i < vtxCount; i++) {
             const uint32_t src = rdramAddress + i * 10;
             Vertex &dst = vertices[dstIndex + i];
