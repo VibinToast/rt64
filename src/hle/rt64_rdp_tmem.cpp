@@ -209,6 +209,36 @@ namespace RT64 {
         return true;
     }
 
+    // JFG PORT: a texture as RT64 decodes it for drawing, as RGBA8 (the lighting tool's texture preview); false when its
+    // size isn't one that was really loaded (as dumpTexturePng checks).
+    bool TextureManager::jfgDecodeTMEM(const uint8_t *TMEM, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, std::vector<uint8_t> &rgba) {
+        const uint32_t stride = uint32_t(loadTile.line) << 3;
+        if ((width == 0) || (height == 0) || (width > 1024) || (height > 1024) || (stride == 0)) {
+            return false;
+        }
+
+        const bool halfTMEM = (tlut > 0) || ((loadTile.fmt == G_IM_FMT_RGBA) && (loadTile.siz == G_IM_SIZ_32b));
+        const bool isRgba32 = (loadTile.fmt == G_IM_FMT_RGBA) && (loadTile.siz == G_IM_SIZ_32b);
+        const uint32_t rowBytes = (uint32_t(width) << (isRgba32 ? 2 : loadTile.siz)) >> 1;
+        if ((uint32_t(height) * stride > (halfTMEM ? 0x800U : 0x1000U)) || (rowBytes > stride)) {
+            return false;
+        }
+
+        rgba.resize(size_t(width) * height * 4);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                const TexelRGBA p = sampleTMEMCPU(TMEM, x, y, loadTile.siz, loadTile.fmt, uint32_t(loadTile.tmem) << 3, stride, tlut, loadTile.palette);
+                uint8_t *dst = &rgba[(size_t(y) * width + x) * 4];
+                dst[0] = p.r;
+                dst[1] = p.g;
+                dst[2] = p.b;
+                dst[3] = p.a;
+            }
+        }
+
+        return true;
+    }
+
     bool TextureManager::dumpTexturePng(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, std::filesystem::path &path) {
         const uint32_t stride = uint32_t(loadTile.line) << 3;
         if ((width == 0) || (height == 0) || (width > 1024) || (height > 1024) || (stride == 0)) {

@@ -42,6 +42,7 @@ namespace RT64 {
         bool dumpSourceIsDynamic(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, uint64_t creationFrame, DumpSource *&source); // JFG PORT
         bool dumpTexturePng(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, std::filesystem::path &path); // JFG PORT
         void resetDump(const std::filesystem::path &directory); // JFG PORT
+        static bool jfgDecodeTMEM(const uint8_t *TMEM, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, std::vector<uint8_t> &rgba); // JFG PORT
         void removeHashes(const std::vector<uint64_t> &hashes);
     };
 };

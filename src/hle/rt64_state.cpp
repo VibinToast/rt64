@@ -124,6 +124,33 @@ namespace {
     }
 }
 
+// JFG PORT: the texture the lighting tool previews (rt64_jfg_preview_request): decoded from TMEM the next time it is
+// drawn, as RT64 decodes it (the original texture, not a pack's replacement).
+namespace {
+    std::atomic<uint64_t> jfgPreviewWanted{ 0 };
+    std::mutex jfgPreviewMutex;
+    uint64_t jfgPreviewHash = 0;
+    uint32_t jfgPreviewWidth = 0, jfgPreviewHeight = 0;
+    std::vector<uint8_t> jfgPreviewPixels;
+}
+
+void rt64_jfg_preview_request(uint64_t hash) {
+    jfgPreviewWanted.store(hash, std::memory_order_relaxed);
+}
+
+// The previewed texture's pixels (RGBA8) once decoded; false until then (or when it can't be).
+bool rt64_jfg_preview(uint64_t hash, uint32_t *width, uint32_t *height, std::vector<uint8_t> &rgba) {
+    std::lock_guard<std::mutex> lock(jfgPreviewMutex);
+    if ((hash == 0) || (hash != jfgPreviewHash) || jfgPreviewPixels.empty()) {
+        return false;
+    }
+
+    *width = jfgPreviewWidth;
+    *height = jfgPreviewHeight;
+    rgba = jfgPreviewPixels;
+    return true;
+}
+
 void rt64_jfg_pick(bool on) {
     jfgPickOn.store(on, std::memory_order_relaxed);
 }
@@ -1105,6 +1132,21 @@ namespace RT64 {
 
                 // JFG PORT: where the texture was loaded from, for glowing textures (rt64_jfg_glow_ranges).
                 rt64_jfg_glow_note(callTile.tmemHashOrID, rdp->rice.lastLoadOpByTMEM[callTile.loadTile.tmem].texture.address);
+
+                // JFG PORT: the lighting tool's texture preview, decoded while TMEM holds it.
+                const uint64_t previewWanted = jfgPreviewWanted.load(std::memory_order_relaxed);
+                if ((previewWanted != 0) && (previewWanted == callTile.tmemHashOrID) && !callTile.rawTMEM) {
+                    std::lock_guard<std::mutex> previewLock(jfgPreviewMutex);
+                    if (jfgPreviewHash != previewWanted) {
+                        std::vector<uint8_t> pixels;
+                        if (TextureManager::jfgDecodeTMEM(reinterpret_cast<const uint8_t *>(rdp->TMEM), callTile.loadTile, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut, pixels)) {
+                            jfgPreviewHash = previewWanted;
+                            jfgPreviewWidth = callTile.sampleWidth;
+                            jfgPreviewHeight = callTile.sampleHeight;
+                            jfgPreviewPixels.swap(pixels);
+                        }
+                    }
+                }
             }
             else if (callTile.reinterpretTile) {
                 struct ReinterpretHashData {
