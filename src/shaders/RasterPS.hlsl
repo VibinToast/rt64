@@ -46,7 +46,7 @@ float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
 #endif
 
 LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float2 vertexUV, float4 vertexSmoothColor, float4 vertexFlatColor,
-    bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
+    float4 vertexWorldPos, bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
 {
     const OtherMode otherMode = { rp.omL, rp.omH };
 #if defined(DYNAMIC_RENDER_PARAMS)
@@ -266,6 +266,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 0.0f, 0.0f), 0.5f);
     }
 #endif
+
+    // JFG PORT: RT64_JFG_DEBUG_WORLD=1: the world position as colour, repeating every 256 units; magenta where a draw
+    // has none (raw triangles, rectangles).
+    if (gConstants.padding.x & RASTER_JFG_DEBUG_WORLD) {
+        resultColor.rgb = (vertexWorldPos.w > 0.5f) ? frac(vertexWorldPos.xyz / 256.0f) : float3(1.0f, 0.0f, 1.0f);
+    }
     
     return true;
 }
@@ -287,6 +293,7 @@ void PSMain(
 #if defined(DYNAMIC_RENDER_PARAMS) || defined(VERTEX_FLAT_COLOR)
     , nointerpolation in float4 vertexFlatColor : COLOR1
 #endif
+    , in float4 vertexWorldPos : TEXCOORD1 // JFG PORT: last, as in RasterVS
 #if defined(DYNAMIC_RENDER_PARAMS)
     , bool isFrontFace : SV_IsFrontFace
 #endif
@@ -303,7 +310,7 @@ void PSMain(
     float4 resultColor;
     float4 resultAlpha;
     float resultDepth;
-    if (!RasterPS(getRenderParams(), vertexPosition, vertexUV, vertexSmoothColor, vertexFlatColor, isFrontFace, resultColor, resultAlpha)) {
+    if (!RasterPS(getRenderParams(), vertexPosition, vertexUV, vertexSmoothColor, vertexFlatColor, vertexWorldPos, isFrontFace, resultColor, resultAlpha)) {
         discard;
     }
 

@@ -183,6 +183,9 @@ namespace RT64 {
         ComputedBuffer genTexCoordBuffer;
         ComputedBuffer shadedColBuffer;
         ComputedBuffer worldPosBuffer;
+        // JFG PORT: the world position of every vertex for the raster shaders (RSPProcessCS, RasterVS). Its own buffer:
+        // VertexProcessor rewrites worldPosBuffer.
+        ComputedBuffer jfgWorldPosBuffer;
         ComputedBuffer worldNormBuffer;
         ComputedBuffer worldVelBuffer;
         ComputedBuffer testZIndexBuffer;

@@ -40,6 +40,7 @@ StructuredBuffer<float4x4> worldTransforms : register(t18);
 RWStructuredBuffer<float4> dstPos : register(u19);
 RWStructuredBuffer<float2> dstTc : register(u20);
 RWStructuredBuffer<float4> dstCol : register(u21);
+RWStructuredBuffer<float4> dstWorldPos : register(u22); // JFG PORT: the world position, for the raster shaders (RasterVS)
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSMain(uint vertexIndex : SV_DispatchThreadID) {
@@ -63,7 +64,9 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     // NDC Position.
     const float3 pos = float3(srcPos[posIndex + 0], srcPos[posIndex + 1], srcPos[posIndex + 2]);
     const float3 vel = float3(srcVel[posIndex + 0], srcVel[posIndex + 1], srcVel[posIndex + 2]);
-    float4 tfPos = mul(mul(viewProjMat, worldMat), float4(pos - vel * (1.0f - gConstants.curFrameWeight), 1.0f));
+    const float4 framePos = float4(pos - vel * (1.0f - gConstants.curFrameWeight), 1.0f);
+    float4 tfPos = mul(mul(viewProjMat, worldMat), framePos);
+    dstWorldPos[vertexOffsetIndex] = float4(mul(worldMat, framePos).xyz, 1.0f); // JFG PORT
 
     // Fog.
     const uint fogIndex = srcFogIndices[vertexOffsetIndex];

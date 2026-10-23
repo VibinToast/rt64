@@ -151,6 +151,7 @@ namespace RT64 {
         uint32_t GPUTiles;
         uint32_t instanceRenderIndices;
         uint32_t DynamicRenderParams;
+        uint32_t jfgWorldPos; // JFG PORT: see below
         uint32_t gLinearWrapWrapSampler;
         uint32_t gLinearWrapMirrorSampler;
         uint32_t gLinearWrapClampSampler;
@@ -221,6 +222,12 @@ namespace RT64 {
             GPUTiles = builder.addStructuredBuffer(4);
             instanceRenderIndices = builder.addStructuredBuffer(5);
             DynamicRenderParams = builder.addStructuredBuffer(6);
+
+            // JFG PORT: the world position of every vertex for the raster shaders (RasterVS). Added before the immutable
+            // samplers on purpose: plume's D3D12 descriptor set counts immutable samplers as view descriptors while its
+            // root signature leaves them out of the view table, so every view added after them lands 18 descriptors
+            // away from where the shaders read it (posBuffer at 27 read zeros). Binding 68 keeps it unique for Vulkan.
+            jfgWorldPos = builder.addByteAddressBuffer(68);
             gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
             gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
             gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());
@@ -527,6 +534,7 @@ namespace RT64 {
         uint32_t dstPos;
         uint32_t dstTc;
         uint32_t dstCol;
+        uint32_t dstWorldPos; // JFG PORT: see RSPProcessCS
 
         RSPProcessDescriptorSet(RenderDevice *device = nullptr) {
             builder.begin();
@@ -551,6 +559,7 @@ namespace RT64 {
             dstPos = builder.addReadWriteStructuredBuffer(19);
             dstTc = builder.addReadWriteStructuredBuffer(20);
             dstCol = builder.addReadWriteStructuredBuffer(21);
+            dstWorldPos = builder.addReadWriteStructuredBuffer(22);
             builder.end();
 
             if (device != nullptr) {

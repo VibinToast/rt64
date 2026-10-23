@@ -11,7 +11,11 @@
 
 [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
 
-LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in float2 iUV, in float4 iColor, out float4 oPosition, out float2 oUV, out float4 oSmoothColor, out float4 oFlatColor) {
+// JFG PORT: the world position of every vertex the RSP processed (RSPProcessCS, the workload's jfgWorldPosBuffer,
+// float4 per vertex; FramebufferRendererDescriptorCommonSet::jfgWorldPos). Indexed draws read it by SV_VertexID.
+ByteAddressBuffer jfgWorldPos : register(t68, space0);
+
+LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in float2 iUV, in float4 iColor, in uint iVertexId, out float4 oPosition, out float2 oUV, out float4 oSmoothColor, out float4 oFlatColor, out float4 oWorldPos) {
     float4 ndcPos = iPosition;
     
     // Skip any sort of transformation on the coordinates when rendering rects.
@@ -37,6 +41,12 @@ LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in floa
     oUV = iUV;
     oSmoothColor = iColor;
     oFlatColor = iColor;
+
+    // JFG PORT: w = 1 marks a valid world position (indexed draws only).
+    oWorldPos = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (gConstants.padding.x & RASTER_JFG_INDEXED) {
+        oWorldPos = float4(asfloat(jfgWorldPos.Load3(iVertexId * 16)), 1.0f);
+    }
 }
 
 #if defined(DYNAMIC_RENDER_PARAMS)
@@ -53,17 +63,19 @@ void VSMain(
     in float4 iPosition : POSITION
     , in float2 iUV : TEXCOORD
     , in float4 iColor : COLOR
+    , in uint iVertexId : SV_VertexID
     , out float4 oPosition : SV_POSITION
     , out float2 oUV : TEXCOORD
     , out float4 oSmoothColor : COLOR0
 #if defined(DYNAMIC_RENDER_PARAMS) || defined(VERTEX_FLAT_COLOR)
     , out float4 oFlatColor : COLOR1
 #endif
+    , out float4 oWorldPos : TEXCOORD1 // JFG PORT: last, so the interface locations match RasterPS's
 )
 {
 #if !defined(DYNAMIC_RENDER_PARAMS) && !defined(VERTEX_FLAT_COLOR)
     float4 oFlatColor;
 #endif
-    RasterVS(getRenderParams(), iPosition, iUV, iColor, oPosition, oUV, oSmoothColor, oFlatColor);
+    RasterVS(getRenderParams(), iPosition, iUV, iColor, iVertexId, oPosition, oUV, oSmoothColor, oFlatColor, oWorldPos);
 }
 #endif

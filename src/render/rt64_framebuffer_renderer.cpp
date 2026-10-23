@@ -5,6 +5,7 @@
 #include "rt64_framebuffer_renderer.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 
 #include "../include/rt64_extended_gbi.h"
@@ -353,6 +354,9 @@ namespace RT64 {
             descriptorTextureReplacementMapEnabled = textureCacheReplacementMapEnabled;
         }
 
+        // JFG PORT: the world position of every vertex for the raster shaders (RasterVS).
+        descCommonSet->setBuffer(descCommonSet->jfgWorldPos, outputBuffers->jfgWorldPosBuffer.buffer.get(), outputBuffers->jfgWorldPosBuffer.allocatedSize);
+
 #   if RT_ENABLED
         if (raytracingEnabled) {
             descCommonSet->setBuffer(descCommonSet->posBuffer, outputBuffers->worldPosBuffer.buffer.get(), outputBuffers->worldPosBuffer.allocatedSize);
@@ -502,7 +506,8 @@ namespace RT64 {
         bool previousVertexTestZ = false;
         const RenderPipeline *previousPipeline = nullptr;
         RenderRect previousScissor;
-        interop::RasterParams rasterParams;
+        interop::RasterParams rasterParams = {};
+        static const bool jfgDebugWorld = std::getenv("RT64_JFG_DEBUG_WORLD") != nullptr; // JFG PORT: see RasterPS
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
 
@@ -1096,6 +1101,8 @@ namespace RT64 {
                 rasterParams.renderIndex = i;
                 rasterParams.screenScale = triangles.screenScale;
                 rasterParams.screenOffset = triangles.screenOffset;
+                rasterParams.padding.x = ((drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ? RASTER_JFG_INDEXED : 0) |
+                    (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0); // JFG PORT: see RasterVS
                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
 
                 drawCallTriangles(drawCall);
