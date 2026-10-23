@@ -328,7 +328,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
     // JFG PORT: the texture's brightness one step along u and along v (the surface detail's slope, see below), sampled
     // as the texture itself is so it changes smoothly between texels.
-    // ... and its authored material maps, when it has them (extra.z = how much they count).
+    // ... and its authored material maps, when it has them (maps: how much each kind counts, 0 = off).
     float4 jfgNormalMap = float4(0.5f, 0.5f, 1.0f, 1.0f);
     float4 jfgSpecularMap = float4(0.0f, 0.0f, 0.0f, 0.0f);
     bool jfgHasNormalMap = false;
@@ -351,20 +351,20 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
         jfgHighlight = gpuTileFlagJfgHighlight(gpuTile.flags);
-        if ((gpuTile.jfgMaterial != 0) && (jfgFrame[0].extra.z > 0.0f)) {
+        if (gpuTile.jfgMaterial != 0) {
             const uint normalSlot = gpuTile.jfgMaterial & 0x3FF;
             const uint specularSlot = (gpuTile.jfgMaterial >> 10) & 0x3FF;
             const uint emissionSlot = (gpuTile.jfgMaterial >> 20) & 0x3FF;
-            if (emissionSlot != 0) {
+            if ((emissionSlot != 0) && (jfgFrame[0].maps.z > 0.0f)) {
                 jfgEmission = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + emissionSlot - 1).rgb;
             }
 
-            if (normalSlot != 0) {
+            if ((normalSlot != 0) && (jfgFrame[0].maps.x > 0.0f)) {
                 jfgNormalMap = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + normalSlot - 1);
                 jfgHasNormalMap = true;
             }
 
-            if (specularSlot != 0) {
+            if ((specularSlot != 0) && (jfgFrame[0].maps.y > 0.0f)) {
                 jfgSpecularMap = jfgSampleMaterial(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, JFG_MATERIAL_BASE + specularSlot - 1);
                 jfgHasSpecularMap = true;
             }
@@ -407,7 +407,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     const float jfgHeight = jfgF.material.x * saturate(1.5f - jfgCameraDistance / 1500.0f); // fades out with distance
     // Shine: from the specular map when there is one (red = strength, green = sharpness 2 to 256), else from the
     // texture's brightness with the settings' strength and sharpness.
-    const float jfgShineStrength = jfgHasSpecularMap ? (jfgSpecularMap.r * 2.0f * jfgF.extra.z) : (jfgF.material.y * lerp(0.25f, 1.0f, jfgTexLum));
+    const float jfgShineStrength = jfgHasSpecularMap ? (jfgSpecularMap.r * 2.0f * jfgF.maps.y) : (jfgF.material.y * lerp(0.25f, 1.0f, jfgTexLum));
     const float jfgSharpness = jfgHasSpecularMap ? exp2(lerp(1.0f, 8.0f, jfgSpecularMap.g)) : max(jfgF.material.z, 1.0f);
     // ... and on characters and objects, with their own strength and sharpness (a specular map still decides).
     const float jfgShineStrengthChar = jfgHasSpecularMap ? jfgShineStrength : (jfgF.characters.x * lerp(0.25f, 1.0f, jfgTexLum));
@@ -427,7 +427,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     if (jfgCharacter && (vertexWorldPos.w > 0.5f)) {
         const JfgObjectLight object = jfgObjects[uint(vertexWorldNorm.w + 0.5f) - 1];
         const float3 n = normalize(vertexWorldNorm.xyz);
-        const float3 nb = jfgHasNormalMap ? jfgMappedNormal(n, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.extra.z)
+        const float3 nb = jfgHasNormalMap ? jfgMappedNormal(n, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.maps.x)
             : jfgDetailNormal(n, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight * jfgF.extra.x); // their own share
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
@@ -482,7 +482,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         const float ambient = float(gConstants.padding.x >> 24) / 128.0f; // the level's own colours are its ambient light
-        const float3 nb = jfgHasNormalMap ? jfgMappedNormal(jfgNormal, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.extra.z)
+        const float3 nb = jfgHasNormalMap ? jfgMappedNormal(jfgNormal, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.maps.x)
             : jfgDetailNormal(jfgNormal, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight);
         float3 added = float3(0.0f, 0.0f, 0.0f);
         float painted = 1.0f; // how much of the level's own colours a shadow (and the detail) leaves
@@ -581,7 +581,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     blInputs.shadeAlpha = shadeColor.a;
     resultColor = Blender::run(otherMode, rp.flags, blInputs, combinerColor, false);
     resultColor.rgb += jfgSpecular; // JFG PORT: shine goes on top of the texture, not into it
-    resultColor.rgb += jfgEmission * jfgFrame[0].characters.z; // JFG PORT: ... and so does an emission map's light
+    resultColor.rgb += jfgEmission * jfgFrame[0].maps.z; // JFG PORT: ... and so does an emission map's light
     if (jfgHighlight) { // JFG PORT: the lighting tool's picked or selected texture pulses brighter
         resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 1.0f, 1.0f), jfgFrame[0].characters.w * 0.75f);
     }

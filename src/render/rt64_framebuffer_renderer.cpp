@@ -158,11 +158,12 @@ bool rt64_jfg_emission_colour(uint64_t hash, float *rgb) {
 //   level's painted glow, 12 share of the surface detail on characters and objects, 13 the directional light casts
 //   shadows (0/1), 14 the size of the area around the view it shadows, 15 how much authored material maps count,
 //   16 the level's smooth surface directions on (0/1), 17 shine strength on characters, 18 its sharpness.
+//   19 how much emission maps count, 20 how much specular maps count (15: normal maps).
 static std::mutex jfgParamsMutex;
-static float jfgParams[20] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
+static float jfgParams[24] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
     std::lock_guard<std::mutex> lock(jfgParamsMutex);
-    memcpy(jfgParams, params, sizeof(float) * std::min(count, 20U));
+    memcpy(jfgParams, params, sizeof(float) * std::min(count, 24U));
 }
 std::atomic<float> rt64_jfg_level_ambient{ 1.0f }; // a scale on the level's own colours, its ambient light (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
@@ -2618,7 +2619,7 @@ namespace RT64 {
             }
         }
 
-        float params[20];
+        float params[24];
         {
             std::lock_guard<std::mutex> lock(jfgParamsMutex);
             memcpy(params, jfgParams, sizeof(params));
@@ -2661,7 +2662,8 @@ namespace RT64 {
         }
 
         frame.sunShadow = jfgSunShadow;
-        frame.characters = { params[17], params[18], params[19], rt64_jfg_highlight_amount.load(std::memory_order_relaxed) };
+        frame.characters = { params[17], params[18], 0.0f, rt64_jfg_highlight_amount.load(std::memory_order_relaxed) };
+        frame.maps = { params[15], params[20], params[19], 0.0f };
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
