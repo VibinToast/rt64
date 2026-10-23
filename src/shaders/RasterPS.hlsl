@@ -215,9 +215,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     if ((vertexWorldNorm.w > 0.5f) && (vertexWorldPos.w > 0.5f)) {
         const JfgObjectLight object = jfgObjects[uint(vertexWorldNorm.w + 0.5f) - 1];
         const float3 n = normalize(vertexWorldNorm.xyz);
-        float brightness = object.params.x * (float(gConstants.padding.x >> 24) / 128.0f);
+        float3 brightness = object.params.x * (float(gConstants.padding.x >> 24) / 128.0f);
         for (uint k = 0; k < uint(object.params.y + 0.5f); k++) {
-            brightness += object.dirs[k].w * saturate(dot(n, normalize(object.dirs[k].xyz)));
+            brightness += object.colors[k].rgb * object.dirs[k].w * saturate(dot(n, normalize(object.dirs[k].xyz)));
         }
 
         float3 added = float3(0.0f, 0.0f, 0.0f);

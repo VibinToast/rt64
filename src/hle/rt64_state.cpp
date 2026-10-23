@@ -98,7 +98,8 @@ static JfgLightFrame &jfgLightFrameFor(uint32_t dlStart) {
 
 // JFG PORT: the frame's lit characters and objects (src/jfg/jfg_lighting.cpp, from lightObject): their vertex arrays
 // (physical start, vertex count, offset into normals), each vertex's normal and slot (DrawData::jfgNormals), and how
-// the game lights each slot (20 floats: 4 x direction + range, then ambient, directions used, light share, 0).
+// the game lights each slot (36 floats: 4 x direction + range, 4 x colour, then ambient, directions used, light
+// share, 0).
 void rt64_jfg_frame_objects(uint32_t dlStart, const uint32_t *ranges, uint32_t rangeCount, const uint32_t *normals,
     uint32_t normalCount, const float *lights, uint32_t lightCount)
 {

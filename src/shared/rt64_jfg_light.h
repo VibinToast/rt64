@@ -23,6 +23,7 @@ namespace interop {
     // normals. 0-1 units (the game's 0-255 / 255).
     struct JfgObjectLight {
         float4 dirs[4];     // xyz = direction towards the light (world), w = range (max - min)
+        float4 colors[4];   // rgb = that light's colour (its colour table in the game; white for the first)
         float4 params;      // x = ambient (min), y = directions used, z = how much the frame's lights add (0-1)
     };
 #ifdef HLSL_CPU
