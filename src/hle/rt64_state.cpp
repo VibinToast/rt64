@@ -41,8 +41,10 @@ std::atomic<uint32_t> rt64_jfg_screen_updates{ 0 };
 // JFG PORT: the game's dynamic lights (its track lights: muzzle flashes, lamps, glowing pickups) for each frame, keyed
 // by the address of the frame's display list (src/jfg/jfg_lighting.cpp sends them when the game submits it). The game
 // double-buffers its display lists and waits for one to finish before building into it again, so a few slots are
-// enough. State::fullSync puts the frame's lights in workload.pointLights. 8 floats per light: x, y, z (game world),
-// radius, inner radius (full strength inside it, linear to 0 at the radius), r, g, b (0-1).
+// enough. State::fullSync puts the frame's lights in workload.pointLights. 9 floats per light: x, y, z (game world),
+// radius, inner radius (full strength inside it, linear to 0 at the radius), r, g, b (0-1), and an id (uint bits, the
+// light's slot in the game). A light with the same id as one in the frame before gets how far it moved in its
+// direction field, so the in-between frames can place it (FramebufferRenderer::setJfgLights).
 namespace {
     struct JfgLightFrame {
         uint32_t dlStart = 0;
@@ -69,18 +71,36 @@ void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) 
         jfgLightFrameNext = (jfgLightFrameNext + 1) % std::size(jfgLightFrames);
     }
 
+    // Where each light was in the frame before; a jump further than this is a new light in a reused slot.
+    static std::unordered_map<uint32_t, hlslpp::float3> previous, current;
+    const float MaxMove = 400.0f;
+    current.clear();
     frame->dlStart = dlStart;
     frame->lights.clear();
     for (uint32_t i = 0; i < count; i++) {
-        const float *l = &data[i * 8];
+        const float *l = &data[i * 9];
+        uint32_t id;
+        memcpy(&id, &l[8], sizeof(id));
         interop::PointLight light = {};
         light.position = { l[0], l[1], l[2] };
         light.attenuationRadius = l[3];
         light.pointRadius = l[4];
         light.diffuseColor = { l[5], l[6], l[7] };
         light.attenuationExponent = 1.0f; // linear, as the game's own falloff
+        const hlslpp::float3 pos(l[0], l[1], l[2]);
+        auto it = previous.find(id);
+        if (it != previous.end()) {
+            const hlslpp::float3 move = pos - it->second;
+            if (float(hlslpp::length(move)) < MaxMove) {
+                light.direction = { float(move.x), float(move.y), float(move.z) };
+            }
+        }
+
+        current[id] = pos;
         frame->lights.emplace_back(light);
     }
+
+    std::swap(previous, current);
 }
 
 static bool jfgTakeFrameLights(uint32_t dlStart, std::vector<interop::PointLight> &dst) {
@@ -1850,7 +1870,7 @@ namespace RT64 {
                 }
 
                 // Record all setup previous to drawing any of the recorded framebuffers.
-                framebufferRenderer->setJfgLights(workload.pointLights); // JFG PORT
+                framebufferRenderer->setJfgLights(workload.pointLights, 1.0f); // JFG PORT
                 framebufferRenderer->endFramebuffers(ext.framebufferGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, false);
                 framebufferRenderer->recordSetup(ext.framebufferGraphicsWorker, bufferUploaders, queuedProcessor, nullptr, &workload.outputBuffers, false);
 

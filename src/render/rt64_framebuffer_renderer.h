@@ -217,7 +217,7 @@ namespace RT64 {
         void submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState);
         void addFramebuffer(const DrawParams &p);
         void endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled);
-        void setJfgLights(const std::vector<interop::PointLight> &lights); // JFG PORT: before endFramebuffers
+        void setJfgLights(const std::vector<interop::PointLight> &lights, float curFrameWeight); // JFG PORT: before endFramebuffers
         void recordSetup(RenderWorker *worker, std::vector<BufferUploader *> bufferUploaders, RSPProcessor *rspProcessor, VertexProcessor *vertexProcessor, const OutputBuffers *outputBuffers, bool rtEnabled);
         void recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex);
         void waitForUploaders();

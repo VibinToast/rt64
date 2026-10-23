@@ -2388,16 +2388,19 @@ namespace RT64 {
         checkRasterScene(rasterScene);
     }
 
-    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights) {
-        // JFG PORT: the game's lights (State::fullSync), at most MaxLights: the nearer ones to the player aren't known
-        // here, so the first ones the game lists are kept. Linear falloff from the inner radius (pointRadius) to the
-        // radius (attenuationRadius).
+    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, float curFrameWeight) {
+        // JFG PORT: the game's lights (State::fullSync), at most MaxLights (the port sends the nearest first). Linear
+        // falloff from the inner radius (pointRadius) to the radius (attenuationRadius). On in-between frames a light is
+        // placed back along how far it moved since the game frame before (direction, see rt64_jfg_frame_lights), as
+        // RSPProcessCS does with vertices.
         const size_t MaxLights = 32;
         jfgLights.clear();
         for (size_t i = 0; (i < lights.size()) && (i < MaxLights); i++) {
             const interop::PointLight &l = lights[i];
             interop::JfgLight dst;
-            dst.posRadius = { l.position.x, l.position.y, l.position.z, l.attenuationRadius };
+            const float back = 1.0f - curFrameWeight;
+            dst.posRadius = { l.position.x - l.direction.x * back, l.position.y - l.direction.y * back, l.position.z - l.direction.z * back,
+                l.attenuationRadius };
             dst.colorInner = { l.diffuseColor.x, l.diffuseColor.y, l.diffuseColor.z, l.pointRadius };
             jfgLights.emplace_back(dst);
         }
