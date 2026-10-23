@@ -90,6 +90,7 @@ namespace RT64 {
         // upload, jfgLightCount is how many are real.
         std::vector<interop::JfgLight> jfgLights;
         uint32_t jfgLightCount = 0;
+        uint32_t jfgRemoverCount = 0; // after them: level lights switched off, which take their painted glow away
         BufferPair jfgLightsBuffer;
         std::vector<interop::JfgFrame> jfgFrameData; // one: camera, directional light, materials, shadow fade
         std::vector<interop::JfgObjectLight> jfgObjects; // by slot; never empty

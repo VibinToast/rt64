@@ -232,7 +232,7 @@ void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) 
         light.pointRadius = l[4];
         light.diffuseColor = { l[5], l[6], l[7] };
         light.attenuationExponent = 1.0f; // linear, as the game's own falloff
-        light.groupBits = (l[9] > 0.5f) ? 1U : 0U; // 1: casts no shadows (setJfgLights)
+        light.groupBits = uint32_t(std::lround(std::max(l[9], 0.0f))); // 1: casts no shadows, 2: switched off, takes its painted glow away (setJfgLights)
         jfgTrackMoves(previous, current, id, light);
         frame->lights.emplace_back(light);
     }

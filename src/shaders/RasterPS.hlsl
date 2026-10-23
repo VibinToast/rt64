@@ -510,13 +510,29 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             }
         }
 
+        // Level lights switched off in the lighting tool (after the lights, padding.y >> 16 of them): the glow painted
+        // around them is taken away, their colour where they reach fully and less towards their edge, never below a
+        // fifth of the level's own colour.
+        float3 removed = float3(0.0f, 0.0f, 0.0f);
+        const uint removerCount = gConstants.padding.y >> 16;
+        for (uint r = lightCount; r < lightCount + removerCount; r++) {
+            const JfgLight light = jfgLights[r];
+            const float radius = light.posRadius.w;
+            const float d = distance(light.posRadius.xyz, vertexWorldPos.xyz);
+            if (d < radius) {
+                const float inner = min(light.colorInner.w, radius - 1.0f);
+                removed += light.colorInner.rgb * saturate((radius - d) / (radius - inner));
+            }
+        }
+
         if (jfgF.sunDir.w > 0.5f) {
             const float3 sun = jfgF.sunColor.rgb * jfgSunVisibility(vertexWorldPos.xyz, jfgFlatNormal, darkness);
             added += sun * saturate(dot(nb, jfgF.sunDir.xyz));
             jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
         }
 
-        shadeColor.rgb = saturate(shadeColor.rgb * ambient * painted + added);
+        const float3 own = shadeColor.rgb * ambient * painted;
+        shadeColor.rgb = saturate(max(own - removed, own * 0.2f) + added);
     }
     float4 combinerColor;
     float alphaCompareValue;

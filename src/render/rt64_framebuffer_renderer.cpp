@@ -650,7 +650,7 @@ namespace RT64 {
         const float jfgFacing = rt64_jfg_facing.load(std::memory_order_relaxed);
         const uint32_t jfgShadows = uint32_t(std::clamp(rt64_jfg_shadows.load(std::memory_order_relaxed), 0.0f, 1.0f) * 255.0f + 0.5f);
         const uint32_t jfgAmbient = uint32_t(std::clamp(rt64_jfg_level_ambient.load(std::memory_order_relaxed), 0.0f, 1.99f) * 128.0f + 0.5f);
-        const bool jfgPixelLights = (rt64_jfg_pixel_lights.load(std::memory_order_relaxed) != 0) && (jfgLightCount > 0);
+        const bool jfgPixelLights = (rt64_jfg_pixel_lights.load(std::memory_order_relaxed) != 0) && ((jfgLightCount + jfgRemoverCount) > 0);
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
 
@@ -1248,7 +1248,7 @@ namespace RT64 {
                     (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | (triangles.jfgLevel ? RASTER_JFG_LEVEL : 0) |
                     (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0) |
                     (jfgDebugShadow ? RASTER_JFG_DEBUG_SHADOW : 0) | (jfgShadows << 16) | (jfgAmbient << 24); // JFG PORT: see RasterVS, RasterPS
-                rasterParams.padding.y = jfgPixelLights ? jfgLightCount : 0;
+                rasterParams.padding.y = jfgPixelLights ? (jfgLightCount | (jfgRemoverCount << 16)) : 0; // JFG PORT: lights, then switched-off ones
                 memcpy(&rasterParams.padding.z, &jfgFacing, sizeof(float));
                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
 
@@ -2570,17 +2570,29 @@ namespace RT64 {
         // falloff from the inner radius (pointRadius) to the radius (attenuationRadius). On in-between frames a light is
         // placed back along how far it moved since the game frame before (direction, see rt64_jfg_frame_lights), as
         // RSPProcessCS does with vertices.
-        const size_t MaxLights = 64;
+        const size_t MaxLights = 64, MaxRemovers = 16;
         jfgLights.clear();
-        for (size_t i = 0; (i < lights.size()) && (i < MaxLights); i++) {
+        std::vector<interop::JfgLight> removers; // switched off: after the lights, they take their painted glow away
+        for (size_t i = 0; i < lights.size(); i++) {
             const interop::PointLight &l = lights[i];
+            if (((l.groupBits & 2U) == 0) && (jfgLights.size() >= MaxLights)) {
+                continue;
+            }
+
             interop::JfgLight dst;
             const float back = 1.0f - curFrameWeight;
             dst.posRadius = { l.position.x - l.direction.x * back, l.position.y - l.direction.y * back, l.position.z - l.direction.z * back,
                 l.attenuationRadius };
             dst.colorInner = { l.diffuseColor.x, l.diffuseColor.y, l.diffuseColor.z, l.pointRadius };
             dst.shadow = { 0.0f, 0.0f, 0.0f, (l.groupBits & 1U) ? 1.0f : 0.0f }; // w: casts no shadows
-            jfgLights.emplace_back(dst);
+            if (l.groupBits & 2U) {
+                if (removers.size() < MaxRemovers) {
+                    removers.emplace_back(dst);
+                }
+            }
+            else {
+                jfgLights.emplace_back(dst);
+            }
         }
 
         // The camera ([0] of the frame's points), placed on in-between frames as the lights are.
@@ -2673,6 +2685,8 @@ namespace RT64 {
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
+        jfgRemoverCount = uint32_t(removers.size());
+        jfgLights.insert(jfgLights.end(), removers.begin(), removers.end());
         if (jfgLights.empty()) {
             jfgLights.emplace_back(); // the upload needs one
         }
