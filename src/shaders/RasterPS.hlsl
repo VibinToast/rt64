@@ -215,9 +215,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     if ((vertexWorldNorm.w > 0.5f) && (vertexWorldPos.w > 0.5f)) {
         const JfgObjectLight object = jfgObjects[uint(vertexWorldNorm.w + 0.5f) - 1];
         const float3 n = normalize(vertexWorldNorm.xyz);
-        float3 brightness = object.params.x * (float(gConstants.padding.x >> 24) / 128.0f);
+        // The first setting is the level's own light (its ambient and one direction, from the level header), so the
+        // level ambient scales both; the others come from nearby lights (torches, lamps) and are left as they are.
+        const float levelAmbient = float(gConstants.padding.x >> 24) / 128.0f;
+        float3 brightness = object.params.x * levelAmbient;
         for (uint k = 0; k < uint(object.params.y + 0.5f); k++) {
-            brightness += object.colors[k].rgb * object.dirs[k].w * saturate(dot(n, normalize(object.dirs[k].xyz)));
+            const float scale = (k == 0) ? levelAmbient : 1.0f;
+            brightness += object.colors[k].rgb * object.dirs[k].w * scale * saturate(dot(n, normalize(object.dirs[k].xyz)));
         }
 
         float3 added = float3(0.0f, 0.0f, 0.0f);
