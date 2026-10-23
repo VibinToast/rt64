@@ -26,6 +26,7 @@ namespace RT64 {
         commandWarnings.clear();
         spriteCommands.clear();
         pointLights.clear();
+        jfgCasters.clear(); // JFG PORT
         fbChangePool.reset();
         fbStorage.reset();
         physicalAddressTransformMap.clear();

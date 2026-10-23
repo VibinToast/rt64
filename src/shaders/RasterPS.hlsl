@@ -17,6 +17,35 @@
 
 // JFG PORT: the frame's lights for the per-pixel level lighting (FramebufferRenderer::setJfgLights), padding.y of them.
 StructuredBuffer<JfgLight> jfgLights : register(t69, space0);
+// ... and the shadow casters (characters and objects): xyz = a sphere's centre, w = its radius.
+StructuredBuffer<float4> jfgCasters : register(t70, space0);
+
+// JFG PORT: how much of a light reaching p is left after the casters between them: each sphere blocks the part of the
+// line from p to the light that passes within its radius, softly over half a radius either side. A caster the light
+// sits in (a lamp or torch object with a shadow of its own) doesn't block it.
+float jfgShadowVisibility(float3 p, float3 lightPos, uint casterCount, float darkness) {
+    const float3 toLight = lightPos - p;
+    const float len = length(toLight);
+    const float3 dir = toLight / max(len, 0.001f);
+    float visibility = 1.0f;
+    for (uint c = 0; c < casterCount; c++) {
+        const float4 caster = jfgCasters[c];
+        if (distance(caster.xyz, lightPos) < caster.w * 1.5f) {
+            continue;
+        }
+
+        const float3 toCaster = caster.xyz - p;
+        const float along = dot(toCaster, dir);
+        if ((along <= 0.0f) || (along >= len)) {
+            continue;
+        }
+
+        const float miss = length(toCaster - dir * along);
+        visibility *= 1.0f - darkness * (1.0f - smoothstep(caster.w * 0.5f, caster.w * 1.5f, miss));
+    }
+
+    return visibility;
+}
 
 #if defined(MULTISAMPLING)
 Texture2DMS<float> gBackgroundDepth : register(t2, space3);
@@ -180,8 +209,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // Facing (padding.z): how much a surface turned away from a light gets less of it, which the game never does.
     if ((gConstants.padding.x & RASTER_JFG_LEVEL) && (vertexWorldPos.w > 0.5f)) {
         const float facing = saturate(asfloat(gConstants.padding.z));
+        const uint lightCount = gConstants.padding.y & 0xFFFF;
+        const uint casterCount = gConstants.padding.y >> 16;
+        const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         float3 added = float3(0.0f, 0.0f, 0.0f);
-        for (uint i = 0; i < gConstants.padding.y; i++) {
+        for (uint i = 0; i < lightCount; i++) {
             const JfgLight light = jfgLights[i];
             const float radius = light.posRadius.w;
             const float3 toLight = light.posRadius.xyz - vertexWorldPos.xyz;
@@ -189,7 +221,8 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             if (d < radius) {
                 const float inner = min(light.colorInner.w, radius - 1.0f);
                 const float towards = saturate(dot(jfgNormal, toLight / max(d, 0.001f)));
-                added += light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * lerp(1.0f, towards, facing);
+                const float visibility = (darkness > 0.0f) ? jfgShadowVisibility(vertexWorldPos.xyz, light.posRadius.xyz, casterCount, darkness) : 1.0f;
+                added += light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * lerp(1.0f, towards, facing) * visibility;
             }
         }
 

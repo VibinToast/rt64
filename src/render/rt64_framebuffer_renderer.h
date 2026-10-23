@@ -88,6 +88,9 @@ namespace RT64 {
         std::vector<interop::JfgLight> jfgLights;
         uint32_t jfgLightCount = 0;
         BufferPair jfgLightsBuffer;
+        std::vector<hlslpp::float4> jfgCasters; // xyz = sphere centre, w = radius; never empty, jfgCasterCount are real
+        uint32_t jfgCasterCount = 0;
+        BufferPair jfgCastersBuffer;
         BufferPair frameParamsBuffer;
         RenderPipelineLayout *rendererPipelineLayout = nullptr;
         RenderPipeline *postBlendDitherNoiseAddPipeline = nullptr;
@@ -217,7 +220,7 @@ namespace RT64 {
         void submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState);
         void addFramebuffer(const DrawParams &p);
         void endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled);
-        void setJfgLights(const std::vector<interop::PointLight> &lights, float curFrameWeight); // JFG PORT: before endFramebuffers
+        void setJfgLights(const std::vector<interop::PointLight> &lights, const std::vector<interop::PointLight> &casters, float curFrameWeight); // JFG PORT: before endFramebuffers
         void recordSetup(RenderWorker *worker, std::vector<BufferUploader *> bufferUploaders, RSPProcessor *rspProcessor, VertexProcessor *vertexProcessor, const OutputBuffers *outputBuffers, bool rtEnabled);
         void recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex);
         void waitForUploaders();

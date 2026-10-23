@@ -49,33 +49,53 @@ namespace {
     struct JfgLightFrame {
         uint32_t dlStart = 0;
         std::vector<interop::PointLight> lights;
+        std::vector<interop::PointLight> casters; // shadow casters: position, pointRadius = radius, direction = move
     };
+
+    // How far each light or caster moved since the frame before, by its id (in its direction field); a jump further
+    // than MaxMove is a new one in a reused slot.
+    void jfgTrackMoves(std::unordered_map<uint32_t, hlslpp::float3> &previous, std::unordered_map<uint32_t, hlslpp::float3> &current,
+        uint32_t id, interop::PointLight &light)
+    {
+        const float MaxMove = 400.0f;
+        const hlslpp::float3 pos(light.position.x, light.position.y, light.position.z);
+        auto it = previous.find(id);
+        if (it != previous.end()) {
+            const hlslpp::float3 move = pos - it->second;
+            if (float(hlslpp::length(move)) < MaxMove) {
+                light.direction = { float(move.x), float(move.y), float(move.z) };
+            }
+        }
+
+        current[id] = pos;
+    }
+
 
     std::mutex jfgLightMutex;
     JfgLightFrame jfgLightFrames[4];
     uint32_t jfgLightFrameNext = 0;
 }
 
-void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) {
-    std::lock_guard<std::mutex> lock(jfgLightMutex);
-    JfgLightFrame *frame = nullptr;
+static JfgLightFrame &jfgLightFrameFor(uint32_t dlStart) {
     for (JfgLightFrame &f : jfgLightFrames) {
         if (f.dlStart == dlStart) {
-            frame = &f;
-            break;
+            return f;
         }
     }
 
-    if (frame == nullptr) {
-        frame = &jfgLightFrames[jfgLightFrameNext];
-        jfgLightFrameNext = (jfgLightFrameNext + 1) % std::size(jfgLightFrames);
-    }
+    JfgLightFrame &frame = jfgLightFrames[jfgLightFrameNext];
+    jfgLightFrameNext = (jfgLightFrameNext + 1) % std::size(jfgLightFrames);
+    frame.dlStart = dlStart;
+    frame.lights.clear();
+    frame.casters.clear();
+    return frame;
+}
 
-    // Where each light was in the frame before; a jump further than this is a new light in a reused slot.
+void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) {
+    std::lock_guard<std::mutex> lock(jfgLightMutex);
+    JfgLightFrame *frame = &jfgLightFrameFor(dlStart);
     static std::unordered_map<uint32_t, hlslpp::float3> previous, current;
-    const float MaxMove = 400.0f;
     current.clear();
-    frame->dlStart = dlStart;
     frame->lights.clear();
     for (uint32_t i = 0; i < count; i++) {
         const float *l = &data[i * 9];
@@ -87,27 +107,41 @@ void rt64_jfg_frame_lights(uint32_t dlStart, const float *data, uint32_t count) 
         light.pointRadius = l[4];
         light.diffuseColor = { l[5], l[6], l[7] };
         light.attenuationExponent = 1.0f; // linear, as the game's own falloff
-        const hlslpp::float3 pos(l[0], l[1], l[2]);
-        auto it = previous.find(id);
-        if (it != previous.end()) {
-            const hlslpp::float3 move = pos - it->second;
-            if (float(hlslpp::length(move)) < MaxMove) {
-                light.direction = { float(move.x), float(move.y), float(move.z) };
-            }
-        }
-
-        current[id] = pos;
+        jfgTrackMoves(previous, current, id, light);
         frame->lights.emplace_back(light);
     }
 
     std::swap(previous, current);
 }
 
-static bool jfgTakeFrameLights(uint32_t dlStart, std::vector<interop::PointLight> &dst) {
+// JFG PORT: the frame's shadow casters (characters and objects with a shadow, src/jfg/jfg_lighting.cpp), sent after its
+// lights: 5 floats each, x, y, z of a sphere's centre (game world), its radius, and an id (uint bits, the object).
+void rt64_jfg_frame_casters(uint32_t dlStart, const float *data, uint32_t count) {
+    std::lock_guard<std::mutex> lock(jfgLightMutex);
+    JfgLightFrame *frame = &jfgLightFrameFor(dlStart);
+    static std::unordered_map<uint32_t, hlslpp::float3> previous, current;
+    current.clear();
+    frame->casters.clear();
+    for (uint32_t i = 0; i < count; i++) {
+        const float *c = &data[i * 5];
+        uint32_t id;
+        memcpy(&id, &c[4], sizeof(id));
+        interop::PointLight caster = {};
+        caster.position = { c[0], c[1], c[2] };
+        caster.pointRadius = c[3];
+        jfgTrackMoves(previous, current, id, caster);
+        frame->casters.emplace_back(caster);
+    }
+
+    std::swap(previous, current);
+}
+
+static bool jfgTakeFrameLights(uint32_t dlStart, std::vector<interop::PointLight> &dst, std::vector<interop::PointLight> &casters) {
     std::lock_guard<std::mutex> lock(jfgLightMutex);
     for (JfgLightFrame &f : jfgLightFrames) {
         if (f.dlStart == dlStart) {
             dst.insert(dst.end(), f.lights.begin(), f.lights.end());
+            casters = f.casters;
             f.dlStart = 0;
             return true;
         }
@@ -1870,7 +1904,7 @@ namespace RT64 {
                 }
 
                 // Record all setup previous to drawing any of the recorded framebuffers.
-                framebufferRenderer->setJfgLights(workload.pointLights, 1.0f); // JFG PORT
+                framebufferRenderer->setJfgLights(workload.pointLights, workload.jfgCasters, 1.0f); // JFG PORT
                 framebufferRenderer->endFramebuffers(ext.framebufferGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, false);
                 framebufferRenderer->recordSetup(ext.framebufferGraphicsWorker, bufferUploaders, queuedProcessor, nullptr, &workload.outputBuffers, false);
 
@@ -2129,7 +2163,7 @@ namespace RT64 {
         }
 
         // JFG PORT: the game's lights for this frame (see rt64_jfg_frame_lights).
-        if (jfgTakeFrameLights(jfgDlStart, workload.pointLights)) {
+        if (jfgTakeFrameLights(jfgDlStart, workload.pointLights, workload.jfgCasters)) {
             static const bool log = std::getenv("RT64_JFG_DEBUG_LIGHTS") != nullptr;
             static uint32_t frames = 0, logged = 0;
             if (log && !workload.pointLights.empty() && (logged < 200) && ((frames++ % 30) == 0)) {

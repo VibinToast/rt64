@@ -153,6 +153,7 @@ namespace RT64 {
         uint32_t DynamicRenderParams;
         uint32_t jfgWorldPos; // JFG PORT: see below
         uint32_t jfgLights;
+        uint32_t jfgCasters;
         uint32_t gLinearWrapWrapSampler;
         uint32_t gLinearWrapMirrorSampler;
         uint32_t gLinearWrapClampSampler;
@@ -230,6 +231,7 @@ namespace RT64 {
             // away from where the shaders read it (posBuffer at 27 read zeros). Binding 68 keeps it unique for Vulkan.
             jfgWorldPos = builder.addByteAddressBuffer(68);
             jfgLights = builder.addStructuredBuffer(69); // the frame's lights (RasterPS)
+            jfgCasters = builder.addStructuredBuffer(70); // the frame's shadow casters (RasterPS)
             gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
             gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
             gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());

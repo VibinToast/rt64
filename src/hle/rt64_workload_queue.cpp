@@ -732,7 +732,7 @@ namespace RT64 {
             ext.workloadGraphicsWorker->commandList->begin();
             ext.workloadGraphicsWorker->commandList->resetQueryPool(queryPool.get(), 0, 2);
             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
-            framebufferRenderer->setJfgLights(workload.pointLights, prevFrame.matched ? curFrameWeight : 1.0f); // JFG PORT
+            framebufferRenderer->setJfgLights(workload.pointLights, workload.jfgCasters, prevFrame.matched ? curFrameWeight : 1.0f); // JFG PORT
             framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
             framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
             

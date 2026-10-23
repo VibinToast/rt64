@@ -4,6 +4,7 @@
 
 #include "rt64_framebuffer_renderer.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +78,7 @@ std::atomic<int> rt64_jfg_pixel_lights{ 0 };   // the game's lights on the level
 std::atomic<int> rt64_jfg_debug_world{ 0 };    // show the world position as colour (RasterPS; F9 Lighting tab, RT64_JFG_DEBUG_WORLD)
 std::atomic<int> rt64_jfg_debug_normal{ 0 };   // show the surface direction as colour (RasterPS; F9 Lighting tab)
 std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting depends on facing the light, 0-1 (RasterPS)
+std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
 std::atomic<float> rt64_jfg_vignette_size{ 0.45f };
 
@@ -361,6 +363,7 @@ namespace RT64 {
         // JFG PORT: the world position of every vertex for the raster shaders (RasterVS).
         descCommonSet->setBuffer(descCommonSet->jfgWorldPos, outputBuffers->jfgWorldPosBuffer.buffer.get(), outputBuffers->jfgWorldPosBuffer.allocatedSize);
         descCommonSet->setBuffer(descCommonSet->jfgLights, jfgLightsBuffer.get(), sizeof(interop::JfgLight) * jfgLights.size(), RenderBufferStructuredView(sizeof(interop::JfgLight)));
+        descCommonSet->setBuffer(descCommonSet->jfgCasters, jfgCastersBuffer.get(), sizeof(hlslpp::float4) * jfgCasters.size(), RenderBufferStructuredView(sizeof(hlslpp::float4)));
 
 #   if RT_ENABLED
         if (raytracingEnabled) {
@@ -515,6 +518,7 @@ namespace RT64 {
         const bool jfgDebugWorld = rt64_jfg_debug_world.load(std::memory_order_relaxed) != 0; // JFG PORT: see RasterPS
         const bool jfgDebugNormal = rt64_jfg_debug_normal.load(std::memory_order_relaxed) != 0;
         const float jfgFacing = rt64_jfg_facing.load(std::memory_order_relaxed);
+        const uint32_t jfgShadows = uint32_t(std::clamp(rt64_jfg_shadows.load(std::memory_order_relaxed), 0.0f, 1.0f) * 255.0f + 0.5f);
         const bool jfgPixelLights = (rt64_jfg_pixel_lights.load(std::memory_order_relaxed) != 0) && (jfgLightCount > 0);
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
@@ -1111,8 +1115,8 @@ namespace RT64 {
                 rasterParams.screenOffset = triangles.screenOffset;
                 rasterParams.padding.x = ((drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ? RASTER_JFG_INDEXED : 0) |
                     (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | ((jfgPixelLights && triangles.jfgLevel) ? RASTER_JFG_LEVEL : 0) |
-                    (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0); // JFG PORT: see RasterVS, RasterPS
-                rasterParams.padding.y = jfgLightCount;
+                    (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0) | (jfgShadows << 16); // JFG PORT: see RasterVS, RasterPS
+                rasterParams.padding.y = jfgLightCount | (jfgCasterCount << 16);
                 memcpy(&rasterParams.padding.z, &jfgFacing, sizeof(float));
                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
 
@@ -2394,7 +2398,7 @@ namespace RT64 {
         checkRasterScene(rasterScene);
     }
 
-    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, float curFrameWeight) {
+    void FramebufferRenderer::setJfgLights(const std::vector<interop::PointLight> &lights, const std::vector<interop::PointLight> &casters, float curFrameWeight) {
         // JFG PORT: the game's lights (State::fullSync), at most MaxLights (the port sends the nearest first). Linear
         // falloff from the inner radius (pointRadius) to the radius (attenuationRadius). On in-between frames a light is
         // placed back along how far it moved since the game frame before (direction, see rt64_jfg_frame_lights), as
@@ -2415,6 +2419,21 @@ namespace RT64 {
         if (jfgLights.empty()) {
             jfgLights.emplace_back(); // the upload needs one
         }
+
+        // The shadow casters, placed on in-between frames as the lights are.
+        const size_t MaxCasters = 64;
+        jfgCasters.clear();
+        for (size_t i = 0; (i < casters.size()) && (i < MaxCasters); i++) {
+            const interop::PointLight &c = casters[i];
+            const float back = 1.0f - curFrameWeight;
+            jfgCasters.emplace_back(c.position.x - c.direction.x * back, c.position.y - c.direction.y * back, c.position.z - c.direction.z * back,
+                c.pointRadius);
+        }
+
+        jfgCasterCount = uint32_t(jfgCasters.size());
+        if (jfgCasters.empty()) {
+            jfgCasters.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);
+        }
     }
 
     void FramebufferRenderer::endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled) {
@@ -2422,7 +2441,8 @@ namespace RT64 {
         std::vector<BufferUploader::Upload> shaderUploads = {
             { renderIndicesVector.data(), { 0, renderIndicesVector.size() }, sizeof(interop::RenderIndices), RenderBufferFlag::STORAGE, { }, &renderIndicesBuffer},
             { &frameParams, { 0, 1 }, sizeof(interop::FrameParams), RenderBufferFlag::CONSTANT, { }, &frameParamsBuffer},
-            { jfgLights.data(), { 0, jfgLights.size() }, sizeof(interop::JfgLight), RenderBufferFlag::STORAGE, { }, &jfgLightsBuffer } // JFG PORT
+            { jfgLights.data(), { 0, jfgLights.size() }, sizeof(interop::JfgLight), RenderBufferFlag::STORAGE, { }, &jfgLightsBuffer }, // JFG PORT
+            { jfgCasters.data(), { 0, jfgCasters.size() }, sizeof(hlslpp::float4), RenderBufferFlag::STORAGE, { }, &jfgCastersBuffer }
         };
 
 #   if RT_ENABLED

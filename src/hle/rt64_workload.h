@@ -228,6 +228,7 @@ namespace RT64 {
         std::vector<CommandWarning> commandWarnings;
         std::vector<SpriteCommand> spriteCommands;
         std::vector<interop::PointLight> pointLights;
+        std::vector<interop::PointLight> jfgCasters; // JFG PORT: the frame's shadow casters (rt64_jfg_frame_casters)
         uint32_t fbPairCount;
         uint32_t fbPairSubmitted;
         uint32_t gameCallCount;
