@@ -50,6 +50,15 @@ namespace RT64 {
         RenderTarget(uint32_t addressForName, Framebuffer::Type type, const RenderMultisampling &multisampling, bool usesHDR);
         ~RenderTarget();
         void releaseTextures();
+
+        // JFG PORT: the present queue marks the target it is drawing from until the GPU is done with that frame. Releasing a
+        // target's textures (a resize, or destroying it) waits for that on any other thread: the workload queue goes on to the
+        // next frame while in-between frames are still being shown, and the window growing (F11) made it resize or destroy a
+        // target the present was binding (crash in VIRenderer::render). A frame the game shows twice let it through, as its
+        // frame counters already counted those targets as presented.
+        static void jfgPresentBegin(const RenderTarget *target);
+        static void jfgPresentEnd();
+        void jfgWaitForPresent() const;
         bool resize(RenderWorker *worker, uint32_t newWidth, uint32_t newHeight);
         void setupColor(RenderWorker *worker, uint32_t width, uint32_t height);
         void setupDepth(RenderWorker *worker, uint32_t width, uint32_t height);
