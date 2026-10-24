@@ -318,7 +318,7 @@ namespace RT64 {
     // Masks addresses as the RSP DMA hardware would.
     template<uint32_t mask> uint32_t RSP::maskPhysicalAddress(uint32_t address) {
         if (DKR.force8MBAddressMask) {
-            return address & mask & 0x007FFFFFU;
+            return address & mask & DKRAddressMask;
         }
         else if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
             return address - ExtendedMask;
@@ -485,8 +485,16 @@ namespace RT64 {
             // in slot 0, so the loaded matrix is the bone's exact model matrix. Its ID: the object whose bone buffer
             // G_DMAOFFSETS points at (setDMAOffsetsDKR) with the bone's place in that buffer.
             const bool ontoCamera = (src == 0);
-            const uint32_t parentId = ontoCamera ? DKR.jfgObjectId : DKR.jfgIds[src];
-            const uint32_t bonePlace = DKR.jfgBoneOffset + (address & 0x00FFFFFFu);
+            uint32_t parentId = ontoCamera ? DKR.jfgObjectId : DKR.jfgIds[src];
+            uint32_t bonePlace = DKR.jfgBoneOffset + (address & 0x00FFFFFFu);
+            if (ontoCamera && (parentId == 0)) {
+                // A bone loaded by its own address after the model's bones were drawn (G_DMAOFFSETS back at 0): the jet
+                // flames of the characters' jetpacks (objDrawPlayerEffects). Its object is the one whose bone buffer
+                // the address is in; without this it got no ID and stayed at the last game frame's place.
+                uint32_t offsetInBuffer = 0;
+                parentId = jfgBoneBufferId(rdramAddress, offsetInBuffer);
+                bonePlace = offsetInBuffer ^ 0x8000u; // apart from the model's own bones (G_DMAOFFSETS-relative)
+            }
             const uint32_t boneId = parentId ? ((parentId * 2654435761u) ^ (bonePlace * 40503u)) : 0;
             DKR.jfgIds[dst] = ((boneId == G_EX_ID_IGNORE) || (boneId == G_EX_ID_AUTO)) ? 0 : boneId;
             DKR.jfgHasModel[dst] = ontoCamera || DKR.jfgHasModel[src];

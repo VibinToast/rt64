@@ -3756,7 +3756,7 @@ namespace RT64 {
 
     uint8_t *State::fromRDRAM(uint32_t rdramAddress) const {
         if ((rsp != nullptr) && rsp->DKR.force8MBAddressMask) {
-            rdramAddress &= 0x007FFFFFU;
+            rdramAddress &= DKRAddressMask;
         }
         return &RDRAM[rdramAddress];
     }
