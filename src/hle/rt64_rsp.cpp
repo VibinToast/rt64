@@ -251,7 +251,7 @@ namespace RT64 {
     // Masks addresses as the RSP DMA hardware would.
     template<uint32_t mask> uint32_t RSP::maskPhysicalAddress(uint32_t address) {
         if (DKR.force8MBAddressMask) {
-            return address & mask & 0x007FFFFFU;
+            return address & mask & DKRAddressMask;
         }
         else if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
             return address - ExtendedMask;

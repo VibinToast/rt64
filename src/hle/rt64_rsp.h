@@ -29,6 +29,11 @@
 #define RSP_MATRIX_ID_STACK_SIZE    256
 
 namespace RT64 {
+    // JFG PORT: the RSP DMA mask used while DKR.force8MBAddressMask is on. The game is an 8 MB title and its pointers
+    // wrap through it as on hardware; the second 8 MB (0x80800000-0x80FFFFFF, which the game never uses) is kept so
+    // the port can put display lists and vertices of its own there (the kept blood splats, src/jfg/jfg_gore.cpp).
+    constexpr uint32_t DKRAddressMask = 0x00FFFFFFU;
+
     struct State;
     struct GBI;
 
