@@ -244,6 +244,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // shine, detail and facing flow across neighbouring planes and corners stay sharp.
     const bool jfgLevelSmooth = (vertexWorldNorm.w > 254.5f) && (dot(vertexWorldNorm.xyz, vertexWorldNorm.xyz) > 0.25f) && (jfgFrame[0].extra.w > 0.5f);
     const bool jfgCharacter = (vertexWorldNorm.w > 0.5f) && (vertexWorldNorm.w < 254.5f);
+    // JFG PORT: an object the game draws unlit (a bridge, a crate): lit like the level, with its flat facing; its share
+    // of the surface detail is the characters' (extra.x).
+    const bool jfgUnlitObject = ((gConstants.padding.x & RASTER_JFG_UNLIT) != 0) && !jfgCharacter;
     float3 jfgNormal = jfgFlatNormal;
     if (jfgLevelSmooth) {
         float3 smoothN = normalize(vertexWorldNorm.xyz);
@@ -336,7 +339,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     float3 jfgEmission = float3(0.0f, 0.0f, 0.0f); // the light it gives off: its emission map
     bool jfgHighlight = false; // the lighting tool's picked or selected texture
     const bool jfgDetailOn = (jfgFrame[0].material.x > 0.0f) &&
-        (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && jfgCharacter));
+        (((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) || ((jfgFrame[0].extra.x > 0.0f) && (jfgCharacter || jfgUnlitObject)));
     float2 jfgTexGrad = float2(0.0f, 0.0f);
     if (renderFlagUsesTexture0(rp.flags)) {
         const uint globalTileIndex = instanceRenderIndices[gConstants.renderIndex].rdpTileIndex + tileIndex0;
@@ -479,13 +482,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // The level: its own colours are its ambient (and hold its torches' painted glow), the frame's lights and the
     // directional light are added. Facing (padding.z): how much a surface turned away from a light gets less of it,
     // which the game never does; the surface detail tilts each light whatever facing is set to.
-    if ((gConstants.padding.x & RASTER_JFG_LEVEL) && (vertexWorldPos.w > 0.5f)) {
+    if (((gConstants.padding.x & RASTER_JFG_LEVEL) || jfgUnlitObject) && (vertexWorldPos.w > 0.5f)) {
         const float facing = saturate(asfloat(gConstants.padding.z));
         const uint lightCount = gConstants.padding.y & 0xFFFF;
         const float darkness = float((gConstants.padding.x >> 16) & 0xFF) / 255.0f;
         const float ambient = float(gConstants.padding.x >> 24) / 128.0f; // the level's own colours are its ambient light
         const float3 nb = jfgHasNormalMap ? jfgMappedNormal(jfgNormal, jfgDpdx, jfgDpdy, ddxVertexUV, ddyVertexUV, jfgNormalMap.rgb, jfgF.maps.x)
-            : jfgDetailNormal(jfgNormal, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight);
+            : jfgDetailNormal(jfgNormal, jfgDpdx, jfgDpdy, jfgLumDeriv, jfgHeight * (jfgUnlitObject ? jfgF.extra.x : 1.0f));
         jfgShadedNormal = nb;
         float3 added = float3(0.0f, 0.0f, 0.0f);
         float painted = 1.0f; // how much of the level's own colours a shadow (and the detail) leaves

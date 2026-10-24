@@ -86,6 +86,7 @@ std::atomic<int> rt64_jfg_pixel_lights{ 0 };   // the game's lights on the level
 std::atomic<int> rt64_jfg_debug_world{ 0 };    // show the world position as colour (RasterPS; F9 Lighting tab, RT64_JFG_DEBUG_WORLD)
 std::atomic<int> rt64_jfg_debug_shadow{ 0 };   // paint the casters' shadows red (RasterPS; F9 Lighting tab)
 std::atomic<int> rt64_jfg_debug_normal{ 0 };   // show the surface direction as colour (RasterPS; F9 Lighting tab)
+std::atomic<int> rt64_jfg_unlit_objects{ 0 };  // objects the game draws unlit are lit like the level (RASTER_JFG_UNLIT)
 std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting depends on facing the light, 0-1 (RasterPS)
 std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
 std::atomic<int> rt64_jfg_shadow_lights{ 4 };  // how many of the nearest lights get a shadow map, 0-4 (recordJfgShadows)
@@ -1292,7 +1293,7 @@ namespace RT64 {
                 rasterParams.screenScale = triangles.screenScale;
                 rasterParams.screenOffset = triangles.screenOffset;
                 rasterParams.padding.x = ((drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ? RASTER_JFG_INDEXED : 0) |
-                    (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | (triangles.jfgLevel ? RASTER_JFG_LEVEL : 0) |
+                    (jfgDebugWorld ? RASTER_JFG_DEBUG_WORLD : 0) | (triangles.jfgLevel ? RASTER_JFG_LEVEL : 0) | (triangles.jfgUnlit ? RASTER_JFG_UNLIT : 0) |
                     (jfgDebugNormal ? RASTER_JFG_DEBUG_NORMAL : 0) |
                     (jfgDebugShadow ? RASTER_JFG_DEBUG_SHADOW : 0) | (jfgShadows << 16) | (jfgAmbient << 24); // JFG PORT: see RasterVS, RasterPS
                 rasterParams.padding.y = jfgPixelLights ? (jfgLightCount | (jfgRemoverCount << 16)) : 0; // JFG PORT: lights, then switched-off ones
@@ -2230,6 +2231,66 @@ namespace RT64 {
         uint32_t vertexTestZFaceIndicesStart = 0;
         int32_t vertexTestZCallIndex = -1;
         RenderViewport viewportClip;
+
+        // JFG PORT: objects the game draws unlit, lit like the level (RASTER_JFG_UNLIT): 3D draws outside the level through
+        // the level's camera (the HUD's 3D parts have a camera of their own). Solid ones (depth tested and written), and
+        // see-through ones (a fish's fins) drawn with the matrix of a solid one, so an object is lit all alike; glows,
+        // flames and smoke have no solid part and keep the game's look.
+        std::vector<uint32_t> jfgLevelProjections;
+        std::unordered_set<uint32_t> jfgSolidWorlds; // world matrices of the solid unlit draws
+        auto jfgLevelCamera = [&](const Projection &proj) {
+            if (proj.type != Projection::Type::Perspective) {
+                return false;
+            }
+
+            for (uint32_t levelTransforms : jfgLevelProjections) {
+                if ((levelTransforms == proj.transformsIndex) ||
+                    (matrixDifference(drawData.projTransforms[levelTransforms], drawData.projTransforms[proj.transformsIndex]) < 1e-4f))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        auto jfgCallWorld = [&](const GameCall &call) -> int64_t {
+            const uint32_t f = call.meshDesc.faceIndicesStart;
+            if ((call.callDesc.triangleCount == 0) || (f >= drawData.faceIndices.size())) {
+                return -1;
+            }
+
+            const uint32_t v = drawData.faceIndices[f];
+            return (v < drawData.worldIndices.size()) ? int64_t(drawData.worldIndices[v]) : -1;
+        };
+
+        if (rt64_jfg_unlit_objects.load(std::memory_order_relaxed) != 0) {
+            for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                const Projection &proj = fbPair.projections[pr];
+                for (uint32_t d = 0; d < proj.gameCallCount; d++) {
+                    if (proj.gameCalls[d].callDesc.jfgLevel) {
+                        jfgLevelProjections.push_back(proj.transformsIndex);
+                        break;
+                    }
+                }
+            }
+
+            for (uint32_t pr = 0; !jfgLevelProjections.empty() && (pr < fbPair.projectionCount); pr++) {
+                const Projection &proj = fbPair.projections[pr];
+                if (!jfgLevelCamera(proj)) {
+                    continue;
+                }
+
+                for (uint32_t d = 0; d < proj.gameCallCount; d++) {
+                    const GameCall &call = proj.gameCalls[d];
+                    const int64_t world = jfgCallWorld(call);
+                    if (!call.callDesc.jfgLevel && call.shaderDesc.otherMode.zCmp() && call.shaderDesc.otherMode.zUpd() && (world >= 0)) {
+                        jfgSolidWorlds.insert(uint32_t(world));
+                    }
+                }
+            }
+        }
+
         for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
             const Projection &proj = fbPair.projections[pr];
             if (proj.scissorRect.isNull()) {
@@ -2429,6 +2490,14 @@ namespace RT64 {
                         triangles.jfgNear = projNear;
                         triangles.jfgFar = projFar;
                         triangles.jfgLevel = call.callDesc.jfgLevel; // JFG PORT
+
+                        // JFG PORT: an object the game draws unlit (see jfgSolidWorlds); lit models are told apart in
+                        // RasterPS by their normals.
+                        triangles.jfgUnlit = false;
+                        if (!call.callDesc.jfgLevel && call.shaderDesc.otherMode.zCmp() && !jfgSolidWorlds.empty() && jfgLevelCamera(proj)) {
+                            const int64_t world = jfgCallWorld(call);
+                            triangles.jfgUnlit = call.shaderDesc.otherMode.zUpd() || ((world >= 0) && (jfgSolidWorlds.count(uint32_t(world)) > 0));
+                        }
 
                         float invRatioScale = 1.0f / aspectRatioScale;
                         float horizontalMisalignment = 0.0f;

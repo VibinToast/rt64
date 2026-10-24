@@ -47,6 +47,7 @@ namespace RT64 {
                 float jfgNear;
                 float jfgFar;
                 bool jfgLevel; // JFG PORT: the level's own geometry (DrawCall::jfgLevel): gets the per-pixel level lighting
+                bool jfgUnlit; // JFG PORT: a solid 3D draw outside the level through the level's camera (RASTER_JFG_UNLIT)
             } triangles;
 
             struct {

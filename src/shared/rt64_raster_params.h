@@ -15,6 +15,8 @@
 #define RASTER_JFG_LEVEL        0x4 // the level's own geometry: light it per pixel with padding.y of the frame's lights
 #define RASTER_JFG_DEBUG_NORMAL 0x8 // show the surface direction as colour
 #define RASTER_JFG_DEBUG_SHADOW 0x10 // paint where the casters block the frame's lights red
+#define RASTER_JFG_UNLIT        0x20 // an object the game draws unlit (no lit model), seen through the level's camera:
+                                     // lit like the level, facing from its own surface (rt64_jfg_unlit_objects)
 // padding.x bits 16-23: how dark the shadows of characters and objects are (0-255).
 // padding.x bits 24-31: the level's ambient, a scale on its own colours (128 = as the game, 0-255 = 0 to ~2).
 // padding.y: the frame's lights (low 16 bits) and shadow casters (high 16 bits) for the level lighting.
