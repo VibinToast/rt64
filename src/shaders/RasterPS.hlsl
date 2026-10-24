@@ -25,6 +25,34 @@ StructuredBuffer<JfgFrame> jfgFrame : register(t70, space0);
 // ... and the shadow maps of the nearest lights: a cube each, one atlas row of six faces (JfgShadow.hlsli).
 Texture2D<float> jfgShadowMap : register(t73, space0);
 
+#ifdef JFG_RAY_QUERY
+// JFG PORT: ray-traced shadows (FramebufferRenderer::recordJfgScene): the frame's shadow casters in the world, the level
+// and the characters and objects drawn through its camera.
+RaytracingAccelerationStructure jfgScene : register(t74, space0);
+
+// 1 when nothing is between p and target, else 0. The ray starts a little off p's surface on the target's side and
+// stops gap short of the target (a lamp's own model around its light).
+float jfgRayLit(float3 p, float3 n, float3 target, float gap) {
+    const float3 side = (dot(n, target - p) < 0.0f) ? -n : n;
+    const float3 origin = p + side * 1.0f;
+    const float3 toTarget = target - origin;
+    const float distanceToTarget = length(toTarget);
+    if (distanceToTarget <= gap + 1.0f) {
+        return 1.0f;
+    }
+
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = toTarget / distanceToTarget;
+    ray.TMin = 0.5f;
+    ray.TMax = distanceToTarget - gap;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> query;
+    query.TraceRayInline(jfgScene, RAY_FLAG_NONE, 0xFF, ray);
+    query.Proceed();
+    return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
+}
+#endif
+
 // JFG PORT: the share of the shadow map around pos (texels, in a size x size area at origin) that is not nearer than
 // depth: each of 3 x 3 neighbours compared at the four texels around it and blended by where pos falls between them
 // (bilinear comparison), so shadow edges are smooth instead of stepped. linearize: stored values are cube depths
@@ -59,6 +87,15 @@ float jfgShadowLit(float2 pos, int2 origin, int size, float depth, bool lineariz
 // soft edge. p is pushed a little towards the light first, along its surface, so a surface doesn't shadow itself. A
 // light without a cube (beyond the nearest few) casts no shadows. darkness: how dark a full shadow is (0-1).
 float jfgShadowVisibility(float3 p, float3 n, JfgLight light, float darkness) {
+#ifdef JFG_RAY_QUERY
+    // Ray-traced: every light that casts shadows (shadow.w = 1: it doesn't), a hard edge for now.
+    if ((light.shadow.w > 0.5f) || (darkness <= 0.0f)) {
+        return 1.0f;
+    }
+
+    const float3 rayTarget = light.posRadius.xyz + float3(0.0f, JFG_SHADOW_LIFT, 0.0f);
+    return 1.0f - darkness * (1.0f - jfgRayLit(p, n, rayTarget, max(light.shadow.y, 12.0f)));
+#endif
     const uint row = uint(light.shadow.x + 0.5f);
     if ((row == 0) || (darkness <= 0.0f)) {
         return 1.0f;
@@ -95,6 +132,11 @@ float jfgSunVisibility(float3 p, float3 n, float darkness) {
     if ((f.sunShadow.w <= 0.0f) || (darkness <= 0.0f)) {
         return 1.0f;
     }
+
+#ifdef JFG_RAY_QUERY
+    // Ray-traced: towards the light, as far as its shadow map's depth range reaches.
+    return 1.0f - darkness * (1.0f - jfgRayLit(p, n, p + f.sunDir.xyz * (2.0f * f.extra.y), 0.0f));
+#endif
 
     uint width, height;
     jfgShadowMap.GetDimensions(width, height);

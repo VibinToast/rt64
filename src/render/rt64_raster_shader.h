@@ -101,11 +101,20 @@ namespace RT64 {
         std::unique_ptr<RenderShader> vertexShader;
         std::unique_ptr<RenderShader> pixelShader;
 
+        // JFG PORT: the ubershader with ray-traced shadows (RasterPSDynamicRQ), when the device has inline ray queries;
+        // its pipelines are made the first time each is asked for.
+        std::unique_ptr<RenderShader> jfgRayPixelShader;
+        PipelineCreation jfgRayCreation;
+        mutable std::mutex jfgRayMutex;
+        mutable std::unique_ptr<RenderPipeline> jfgRayPipelines[8];
+
         RasterShaderUber(RenderDevice *device, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, const ShaderLibrary *shaderLibrary, uint32_t threadCount);
         ~RasterShaderUber();
         void threadCreatePipelines(uint32_t threadIndex);
         void waitForPipelineCreation();
         uint32_t pipelineStateIndex(bool zCmp, bool zUpd, bool cvgAdd) const;
         const RenderPipeline *getPipeline(bool zCmp, bool zUpd, bool cvgAdd) const;
+        bool jfgRayAvailable() const;
+        const RenderPipeline *getJfgRayPipeline(bool zCmp, bool zUpd, bool cvgAdd) const;
     };
 };

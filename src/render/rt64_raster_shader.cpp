@@ -37,6 +37,8 @@
 #   include "shaders/RasterVSLibrary.hlsl.dxil.h"
 #   include "shaders/RasterPSDynamic.hlsl.dxil.h"
 #   include "shaders/RasterPSDynamicMS.hlsl.dxil.h"
+#   include "shaders/RasterPSDynamicRQ.hlsl.dxil.h"
+#   include "shaders/RasterPSDynamicRQMS.hlsl.dxil.h"
 #   include "shaders/RasterVSDynamic.hlsl.dxil.h"
 #   include "shaders/PostBlendDitherNoiseAddPS.hlsl.dxil.h"
 #   include "shaders/PostBlendDitherNoiseSubPS.hlsl.dxil.h"
@@ -515,6 +517,16 @@ namespace RT64 {
         creation.usesHDR = shaderLibrary->usesHDR;
         creation.multisampling = multisampling;
 
+#   ifdef _WIN32
+        // JFG PORT: the ubershader with ray-traced shadows (getJfgRayPipeline).
+        if ((shaderFormat == RenderShaderFormat::DXIL) && device->getCapabilities().rayQuery) {
+            jfgRayPixelShader = useMSAA ? device->createShader(RasterPSDynamicRQMSBlobDXIL, std::size(RasterPSDynamicRQMSBlobDXIL), "PSMain", shaderFormat)
+                : device->createShader(RasterPSDynamicRQBlobDXIL, std::size(RasterPSDynamicRQBlobDXIL), "PSMain", shaderFormat);
+            jfgRayCreation = creation;
+            jfgRayCreation.pixelShader = jfgRayPixelShader.get();
+        }
+#   endif
+
         uint32_t threadIndex = 0;
         for (uint32_t i = 0; i < pipelineCount; i++) {
             creation.zCmp = i & (1 << 0);
@@ -850,7 +862,10 @@ namespace RT64 {
 
             pipelineThreads.clear();
             pipelineThreadCreations.clear();
-            vertexShader.reset();
+            if (jfgRayPixelShader == nullptr) {
+                vertexShader.reset(); // JFG PORT: kept for the ray-traced shadows' pipelines, made later (getJfgRayPipeline)
+            }
+
             pixelShader.reset();
             pipelinesCreated = true;
         }
@@ -865,5 +880,23 @@ namespace RT64 {
 
     const RenderPipeline *RasterShaderUber::getPipeline(bool zCmp, bool zUpd, bool cvgAdd) const {
         return pipelines[pipelineStateIndex(zCmp, zUpd, cvgAdd)].get();
+    }
+
+    bool RasterShaderUber::jfgRayAvailable() const {
+        return jfgRayPixelShader != nullptr;
+    }
+
+    const RenderPipeline *RasterShaderUber::getJfgRayPipeline(bool zCmp, bool zUpd, bool cvgAdd) const {
+        std::scoped_lock<std::mutex> lock(jfgRayMutex);
+        std::unique_ptr<RenderPipeline> &pipeline = jfgRayPipelines[pipelineStateIndex(zCmp, zUpd, cvgAdd)];
+        if (pipeline == nullptr) {
+            PipelineCreation creation = jfgRayCreation;
+            creation.zCmp = zCmp;
+            creation.zUpd = zUpd;
+            creation.cvgAdd = cvgAdd;
+            pipeline = RasterShader::createPipeline(creation);
+        }
+
+        return pipeline.get();
     }
 };

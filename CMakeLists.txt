@@ -504,6 +504,12 @@ endif()
 
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING")
+# JFG PORT: the ubershader with ray-traced shadows (RayQuery needs shader model 6.5; D3D12 only for now).
+if (WIN32)
+    set (DXC_PS_RQ_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_5")
+    build_shader_dxil(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/RasterPSDynamicRQ.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D JFG_RAY_QUERY")
+    build_shader_dxil(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/RasterPSDynamicRQMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" "-D JFG_RAY_QUERY")
+endif()
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")

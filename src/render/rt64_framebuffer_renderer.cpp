@@ -86,6 +86,7 @@ std::atomic<int> rt64_jfg_pixel_lights{ 0 };   // the game's lights on the level
 std::atomic<int> rt64_jfg_debug_world{ 0 };    // show the world position as colour (RasterPS; F9 Lighting tab, RT64_JFG_DEBUG_WORLD)
 std::atomic<int> rt64_jfg_debug_shadow{ 0 };   // paint the casters' shadows red (RasterPS; F9 Lighting tab)
 std::atomic<int> rt64_jfg_debug_normal{ 0 };   // show the surface direction as colour (RasterPS; F9 Lighting tab)
+std::atomic<int> rt64_jfg_ray_shadows{ 0 };    // ray-traced shadows instead of the shadow maps, when the GPU can (recordJfgScene)
 std::atomic<int> rt64_jfg_unlit_objects{ 0 };  // objects the game draws unlit are lit like the level (RASTER_JFG_UNLIT)
 std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting depends on facing the light, 0-1 (RasterPS)
 std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
@@ -1994,6 +1995,7 @@ namespace RT64 {
         shaderUploader->commandListAfterBarriers(worker);
         pendingUploaders = bufferUploaders;
         recordJfgShadows(worker); // JFG PORT: after the world positions and the uploads
+        recordJfgScene(worker, outputBuffers); // JFG PORT: ... and the shadow casters for ray-traced shadows
 
         if (!dynamicTextureBarrierVector.empty()) {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, dynamicTextureBarrierVector);
@@ -2130,6 +2132,7 @@ namespace RT64 {
         fogPipeline = rasterShaderUber->fogPipeline.get();
         vignettePipeline = rasterShaderUber->vignettePipeline.get();
         jfgShadowPipeline = rasterShaderUber->jfgShadowPipeline.get(); // JFG PORT
+        jfgRayFrame = (rt64_jfg_ray_shadows.load(std::memory_order_relaxed) != 0) && rasterShaderUber->jfgRayAvailable(); // JFG PORT
         bloomPipelineLayout = rasterShaderUber->bloomPipelineLayout.get();
         bloomExtractPipeline = rasterShaderUber->bloomExtractPipeline.get();
         bloomBlurPipeline = rasterShaderUber->bloomBlurPipeline.get();
@@ -2471,16 +2474,17 @@ namespace RT64 {
                     {
                         triangles.shaderDesc = call.shaderDesc;
 
-                        RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
+                        // JFG PORT: with ray-traced shadows every draw uses the ubershader that traces them.
+                        RasterShader *gpuShader = (p.ubershadersOnly || jfgRayFrame) ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
                         if (gpuShader != nullptr) {
                             triangles.pipeline = gpuShader->pipeline.get();
                         }
                         else {
                             const bool copyMode = (call.shaderDesc.otherMode.cycleType() == G_CYC_COPY);
-                            triangles.pipeline = rasterShaderUber->getPipeline(
-                                !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
-                                !copyMode && call.shaderDesc.otherMode.zUpd(),
-                                (call.shaderDesc.otherMode.cvgDst() == CVG_DST_WRAP) || (call.shaderDesc.otherMode.cvgDst() == CVG_DST_SAVE));
+                            const bool zCmp = !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC);
+                            const bool zUpd = !copyMode && call.shaderDesc.otherMode.zUpd();
+                            const bool cvgAdd = (call.shaderDesc.otherMode.cvgDst() == CVG_DST_WRAP) || (call.shaderDesc.otherMode.cvgDst() == CVG_DST_SAVE);
+                            triangles.pipeline = jfgRayFrame ? rasterShaderUber->getJfgRayPipeline(zCmp, zUpd, cvgAdd) : rasterShaderUber->getPipeline(zCmp, zUpd, cvgAdd);
                         }
                         
                         triangles.faceCount = call.callDesc.triangleCount;
@@ -2830,7 +2834,8 @@ namespace RT64 {
             jfgShadowIndices.assign(3, 0);
         }
 
-        shaderUploads.push_back({ jfgShadowIndices.data(), { 0, jfgShadowIndices.size() }, sizeof(uint32_t), RenderBufferFlag::INDEX, { }, &jfgShadowIndicesBuffer });
+        shaderUploads.push_back({ jfgShadowIndices.data(), { 0, jfgShadowIndices.size() }, sizeof(uint32_t),
+            RenderBufferFlag::INDEX | (worker->device->getCapabilities().raytracing ? RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT : RenderBufferFlag::NONE), { }, &jfgShadowIndicesBuffer });
         updateJfgShadowAtlas(worker);
 
 #   if RT_ENABLED
@@ -3136,6 +3141,91 @@ namespace RT64 {
 
     // JFG PORT: the faces of each shadowed light's cube, after the RSP has written the frame's world positions: the
     // frame's shadow triangles drawn once per face into its tile (JfgShadowVS).
+    // JFG PORT: ray-traced shadows (rt64_jfg_ray_shadows, RasterPS with JFG_RAY_QUERY): the frame's shadow casters (the
+    // level and the 3D draws that write depth through its camera, jfgShadowIndices) in the world (jfgWorldPos), as one
+    // bottom level structure in one top level instance, rebuilt every frame (preferring a fast build) and bound at t74.
+    // The buffers only grow.
+    void FramebufferRenderer::recordJfgScene(RenderWorker *worker, const OutputBuffers *outputBuffers) {
+        if (!jfgRayFrame || (outputBuffers == nullptr) || (outputBuffers->jfgWorldPosBuffer.buffer == nullptr) || (jfgShadowIndicesBuffer.get() == nullptr)) {
+            return;
+        }
+
+        RenderDevice *device = worker->device;
+        RenderBuffer *worldPos = outputBuffers->jfgWorldPosBuffer.buffer.get();
+        RenderBuffer *indices = jfgShadowIndicesBuffer.defaultBuffer.get();
+        const uint32_t vertexCount = uint32_t(outputBuffers->jfgWorldPosBuffer.allocatedSize / (sizeof(float) * 4));
+        const RenderBottomLevelASMesh mesh(RenderBufferReference(indices), RenderBufferReference(worldPos), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT,
+            uint32_t(jfgShadowIndices.size()), vertexCount, sizeof(float) * 4, true);
+
+        RenderBottomLevelASBuildInfo bottomInfo;
+        device->setBottomLevelASBuildInfo(bottomInfo, &mesh, 1, true, false);
+        // A buffer outgrown is kept for a few frames, as the GPU may still be using it for the frames before.
+        jfgSceneFrame++;
+        while (!jfgRetired.empty() && (jfgSceneFrame - jfgRetired.front().first > 8)) {
+            jfgRetired.pop_front();
+        }
+
+        while (!jfgRetiredAS.empty() && (jfgSceneFrame - jfgRetiredAS.front().first > 8)) {
+            jfgRetiredAS.pop_front();
+        }
+
+        auto grow = [&](std::unique_ptr<RenderBuffer> &buffer, uint64_t &capacity, uint64_t size, const RenderBufferDesc &desc) {
+            if ((buffer == nullptr) || (capacity < size)) {
+                capacity = std::max(size * 2, uint64_t(4) << 20);
+                RenderBufferDesc grown = desc;
+                grown.size = capacity;
+                if (buffer != nullptr) {
+                    jfgRetired.emplace_back(jfgSceneFrame, std::move(buffer));
+                }
+
+                buffer = device->createBuffer(grown);
+                return true;
+            }
+
+            return false;
+        };
+
+        if (grow(jfgBottomBuffer, jfgBottomCapacity, bottomInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(0))) {
+            jfgRetiredAS.emplace_back(jfgSceneFrame, std::move(jfgBottomAS));
+            jfgBottomAS = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::BOTTOM_LEVEL, RenderBufferReference(jfgBottomBuffer.get()), jfgBottomCapacity));
+        }
+
+        grow(jfgBottomScratch, jfgBottomScratchCapacity, bottomInfo.scratchSize, RenderBufferDesc::DefaultBuffer(0, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+
+        // Its inputs are read where shaders read them.
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, {
+            RenderBufferBarrier(worldPos, RenderBufferAccess::READ),
+            RenderBufferBarrier(indices, RenderBufferAccess::READ)
+        });
+
+        worker->commandList->buildBottomLevelAS(jfgBottomAS.get(), RenderBufferReference(jfgBottomScratch.get()), bottomInfo);
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(jfgBottomBuffer.get(), RenderBufferAccess::READ));
+
+        // One instance of it, in place.
+        RenderAffineTransform identity;
+        memset(&identity, 0, sizeof(identity));
+        identity.m[0][0] = identity.m[1][1] = identity.m[2][2] = 1.0f;
+        const RenderTopLevelASInstance instance(RenderBufferReference(jfgBottomBuffer.get()), 0, 0xFF, 0, true, identity);
+        RenderTopLevelASBuildInfo topInfo;
+        device->setTopLevelASBuildInfo(topInfo, &instance, 1, true, false);
+        if (jfgInstancesBuffer == nullptr) {
+            jfgInstancesBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(topInfo.instancesBufferData.size(), RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+            void *mapped = jfgInstancesBuffer->map();
+            memcpy(mapped, topInfo.instancesBufferData.data(), topInfo.instancesBufferData.size());
+            jfgInstancesBuffer->unmap();
+        }
+
+        if (grow(jfgTopBuffer, jfgTopCapacity, topInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(0))) {
+            jfgRetiredAS.emplace_back(jfgSceneFrame, std::move(jfgTopAS));
+            jfgTopAS = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::TOP_LEVEL, RenderBufferReference(jfgTopBuffer.get()), jfgTopCapacity));
+        }
+
+        grow(jfgTopScratch, jfgTopScratchCapacity, topInfo.scratchSize, RenderBufferDesc::DefaultBuffer(0, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+        worker->commandList->buildTopLevelAS(jfgTopAS.get(), RenderBufferReference(jfgTopScratch.get()), RenderBufferReference(jfgInstancesBuffer.get()), topInfo);
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderBufferBarrier(jfgTopBuffer.get(), RenderBufferAccess::READ));
+        descCommonSet->setAccelerationStructure(descCommonSet->jfgScene, jfgTopAS.get());
+    }
+
     void FramebufferRenderer::recordJfgShadows(RenderWorker *worker) {
         if (jfgShadowAtlas == nullptr) {
             return;

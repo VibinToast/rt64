@@ -251,7 +251,8 @@ namespace RT64 {
         updateOutputBuffer(worker, outputBuffers.genTexCoordBuffer, vertexCount * sizeof(float) * 2, RenderBufferFlag::VERTEX);
         updateOutputBuffer(worker, outputBuffers.shadedColBuffer, vertexCount * sizeof(float) * 4, RenderBufferFlag::VERTEX);
         updateOutputBuffer(worker, outputBuffers.worldPosBuffer, vertexCount * sizeof(float) * 4, rtInputFlag);
-        updateOutputBuffer(worker, outputBuffers.jfgWorldPosBuffer, vertexCount * sizeof(float) * 4); // JFG PORT
+        updateOutputBuffer(worker, outputBuffers.jfgWorldPosBuffer, vertexCount * sizeof(float) * 4, // JFG PORT: also ray-traced shadows' input
+            worker->device->getCapabilities().raytracing ? RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT : RenderBufferFlag::NONE);
         updateOutputBuffer(worker, outputBuffers.jfgWorldNormBuffer, vertexCount * sizeof(float) * 4);
         updateOutputBuffer(worker, outputBuffers.worldNormBuffer, vertexCount * sizeof(float) * 4);
         updateOutputBuffer(worker, outputBuffers.worldVelBuffer, vertexCount * sizeof(float) * 4);

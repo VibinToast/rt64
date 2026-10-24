@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <deque>
+
 #include <stdint.h>
 
 #include "common/rt64_emulator_configuration.h"
@@ -123,6 +125,14 @@ namespace RT64 {
         float jfgSunRange = 4000.0f; // ... its depth half range
         uint32_t jfgShadowTile = 0;
         bool jfgShadowAtlasReadable = false;
+        // JFG PORT: ray-traced shadows (recordJfgScene): on for this frame, and the acceleration structures' buffers.
+        bool jfgRayFrame = false;
+        std::unique_ptr<RenderBuffer> jfgBottomBuffer, jfgBottomScratch, jfgTopBuffer, jfgTopScratch, jfgInstancesBuffer;
+        uint64_t jfgBottomCapacity = 0, jfgBottomScratchCapacity = 0, jfgTopCapacity = 0, jfgTopScratchCapacity = 0;
+        std::unique_ptr<RenderAccelerationStructure> jfgBottomAS, jfgTopAS;
+        uint64_t jfgSceneFrame = 0;
+        std::deque<std::pair<uint64_t, std::unique_ptr<RenderBuffer>>> jfgRetired; // outgrown, freed some frames later
+        std::deque<std::pair<uint64_t, std::unique_ptr<RenderAccelerationStructure>>> jfgRetiredAS;
         std::unique_ptr<RenderTexture> jfgShadowAtlas;
         std::unique_ptr<RenderTextureView> jfgShadowAtlasView;
         std::unique_ptr<RenderFramebuffer> jfgShadowFramebuffer;
@@ -192,6 +202,7 @@ namespace RT64 {
         void scanJfgMaterials(const TextureCache *textureCache); // JFG PORT
         void uploadJfgMaterials(RenderWorker *worker); // JFG PORT
         void recordJfgShadows(RenderWorker *worker); // JFG PORT
+        void recordJfgScene(RenderWorker *worker, const OutputBuffers *outputBuffers); // JFG PORT: ray-traced shadows
         RenderDescriptorSet *makeBloomDescriptorSet(RenderWorker *worker, RenderTexture *texture, RenderTextureView *textureView);
         std::unique_ptr<FramebufferRendererDescriptorCommonSet> descCommonSet;
         std::unique_ptr<FramebufferRendererDescriptorTextureSet> descTextureSet;

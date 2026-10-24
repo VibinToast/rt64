@@ -157,6 +157,7 @@ namespace RT64 {
         uint32_t jfgWorldNorm;
         uint32_t jfgObjects;
         uint32_t jfgShadowMap;
+        uint32_t jfgScene;
         uint32_t gLinearWrapWrapSampler;
         uint32_t gLinearWrapMirrorSampler;
         uint32_t gLinearWrapClampSampler;
@@ -238,6 +239,7 @@ namespace RT64 {
             jfgWorldNorm = builder.addByteAddressBuffer(71); // characters' normals in the world (RasterVS)
             jfgObjects = builder.addStructuredBuffer(72); // how the frame's characters are lit (RasterPS)
             jfgShadowMap = builder.addTexture(73); // the lights' shadow cubes, one atlas (RasterPS, JfgShadow.hlsli)
+            jfgScene = raytracing ? builder.addAccelerationStructure(74) : 0; // the shadow casters for ray-traced shadows (RasterPS)
             gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
             gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
             gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());
