@@ -209,10 +209,10 @@ bool rt64_jfg_emission_colour(uint64_t hash, float *rgb) {
 //   16 the level's smooth surface directions on (0/1), 17 shine strength on characters, 18 its sharpness.
 //   19 how much emission maps count, 20 how much specular maps count (15: normal maps).
 static std::mutex jfgParamsMutex;
-static float jfgParams[24] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
+static float jfgParams[32] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
     std::lock_guard<std::mutex> lock(jfgParamsMutex);
-    memcpy(jfgParams, params, sizeof(float) * std::min(count, 24U));
+    memcpy(jfgParams, params, sizeof(float) * std::min(count, 32U));
 }
 std::atomic<float> rt64_jfg_level_ambient{ 1.0f }; // a scale on the level's own colours, its ambient light (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
@@ -352,6 +352,7 @@ namespace RT64 {
         jfgShadowRetiredViews.clear();
         jfgShadowRetiredFramebuffers.clear();
         jfgShadowIndices.clear();
+        jfgShadowObjectIndices.clear(); // JFG PORT
         jfgFrame++;
         renderIndicesVector.clear();
         rspSmoothNormalVector.clear();
@@ -750,7 +751,10 @@ namespace RT64 {
         // the depth test still hides them behind anything in front, so only their blending over later opaque draws
         // behind them changes. Nothing is moved across a fill (clear) or a draw without depth test.
         const bool targetsPresent = (fbStorage->colorTarget != nullptr) && (fbStorage->depthTarget != nullptr);
-        const bool ssaoOn = (rt64_jfg_ssao.load(std::memory_order_relaxed) != 0) && (ssaoPipeline != nullptr) && (ssaoBlurPipeline != nullptr) &&
+        // JFG PORT: ray-traced ambient occlusion goes through the same pass (SsaoPS with JFG_RAY_QUERY), in place of the screen-space one.
+        const bool jfgRayAO = jfgRayFrame && (ssaoRayPipeline != nullptr) && !jfgFrameData.empty() &&
+            ((float(jfgFrameData[0].occlusion.x) > 0.0f) || (float(jfgFrameData[0].occlusion.z) > 0.0f));
+        const bool ssaoOn = ((rt64_jfg_ssao.load(std::memory_order_relaxed) != 0) || jfgRayAO) && (ssaoPipeline != nullptr) && (ssaoBlurPipeline != nullptr) &&
             targetsPresent && (fbStorage->colorWriteDepthRead != nullptr);
         const bool bloomOn = (rt64_jfg_bloom.load(std::memory_order_relaxed) != 0) && (bloomCompositePipeline != nullptr) &&
             targetsPresent && (fbStorage->colorWriteDepthRead != nullptr);
@@ -1050,12 +1054,12 @@ namespace RT64 {
             const RenderRect fullRect(0, 0, int32_t(width), int32_t(height));
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(buffers->texture[0].get(), RenderTextureLayout::COLOR_WRITE));
             worker->commandList->setFramebuffer(buffers->framebuffer[0].get());
-            worker->commandList->setPipeline(ssaoPipeline);
+            worker->commandList->setPipeline(jfgRayAO ? ssaoRayPipeline : ssaoPipeline);
             worker->commandList->setViewports(fullViewport);
             worker->commandList->setScissors(fullRect);
             interop::RasterParams ssaoParams = {};
-            const float strength = rt64_jfg_ssao_strength.load(std::memory_order_relaxed);
-            const float radius = rt64_jfg_ssao_radius.load(std::memory_order_relaxed);
+            const float strength = jfgRayAO ? float(jfgFrameData[0].occlusion.y) : rt64_jfg_ssao_strength.load(std::memory_order_relaxed);
+            const float radius = jfgRayAO ? float(jfgFrameData[0].occlusion.x) : rt64_jfg_ssao_radius.load(std::memory_order_relaxed);
             memcpy(&ssaoParams.padding.x, &strength, sizeof(float));
             memcpy(&ssaoParams.padding.y, &radius, sizeof(float));
             // The scene's own projection; without one, the field of view the game last set (camSetFOV) and its usual planes.
@@ -2129,6 +2133,7 @@ namespace RT64 {
         postBlendDitherNoiseSubPipeline = rasterShaderUber->postBlendDitherNoiseSubPipeline.get();
         postBlendDitherNoiseSubNegativePipeline = rasterShaderUber->postBlendDitherNoiseSubNegativePipeline.get();
         ssaoPipeline = rasterShaderUber->ssaoPipeline.get();
+        ssaoRayPipeline = rasterShaderUber->ssaoRayPipeline.get(); // JFG PORT
         fogPipeline = rasterShaderUber->fogPipeline.get();
         vignettePipeline = rasterShaderUber->vignettePipeline.get();
         jfgShadowPipeline = rasterShaderUber->jfgShadowPipeline.get(); // JFG PORT
@@ -2494,6 +2499,10 @@ namespace RT64 {
                         triangles.jfgNear = projNear;
                         triangles.jfgFar = projFar;
                         triangles.jfgLevel = call.callDesc.jfgLevel; // JFG PORT
+                        if (call.callDesc.jfgLevel && (proj.type == Projection::Type::Perspective)) {
+                            jfgViewTransforms = proj.transformsIndex; // JFG PORT: the level's camera (endFramebuffers)
+                            jfgViewDrawData = &drawData;
+                        }
 
                         // JFG PORT: an object the game draws unlit (see jfgSolidWorlds); lit models are told apart in
                         // RasterPS by their normals.
@@ -2670,8 +2679,10 @@ namespace RT64 {
                     (matrixDifference(drawData.projTransforms[l.transformsIndex], drawData.projTransforms[c.transformsIndex]) < 1e-4f));
             }
 
+            // The level's first, the characters' and objects' after it (endFramebuffers), so the ray-traced scene can tell them apart.
             if (keep) {
-                jfgShadowIndices.insert(jfgShadowIndices.end(), drawData.faceIndices.begin() + c.start, drawData.faceIndices.begin() + c.end);
+                std::vector<uint32_t> &dst = c.level ? jfgShadowIndices : jfgShadowObjectIndices;
+                dst.insert(dst.end(), drawData.faceIndices.begin() + c.start, drawData.faceIndices.begin() + c.end);
             }
         }
 
@@ -2682,6 +2693,7 @@ namespace RT64 {
         const std::vector<interop::JfgObjectLight> &objects, float curFrameWeight)
     {
         jfgObjects = objects;
+        jfgFrameWeight = curFrameWeight;
         if (jfgObjects.empty()) {
             jfgObjects.emplace_back(); // the upload needs one
         }
@@ -2757,7 +2769,7 @@ namespace RT64 {
             }
         }
 
-        float params[24];
+        float params[32];
         {
             std::lock_guard<std::mutex> lock(jfgParamsMutex);
             memcpy(params, jfgParams, sizeof(params));
@@ -2804,6 +2816,7 @@ namespace RT64 {
         frame.maps = { params[15], params[20], params[19], params[21] };
         static uint32_t jfgFrameNumber = 0;
         frame.rays = { params[22], params[23], float(jfgFrameNumber++ & 0xFFFF), 0.0f };
+        frame.occlusion = { params[24], params[25], params[26], params[27] };
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
@@ -2819,6 +2832,28 @@ namespace RT64 {
             jfgFrameData.emplace_back(interop::JfgFrame{}); // JFG PORT: the upload needs one
         }
 
+        // JFG PORT: the level camera's view to the world for the ray-traced ambient occlusion (SsaoPS), between the game
+        // frame before and this one by the frame's weight, as the in-between frames are drawn.
+        if ((jfgViewDrawData != nullptr) && (jfgViewTransforms < jfgViewDrawData->viewTransforms.size())) {
+            const hlslpp::float4x4 cur = jfgViewDrawData->viewTransforms[jfgViewTransforms];
+            const hlslpp::float4x4 prev = (jfgViewTransforms < jfgViewDrawData->prevViewTransforms.size()) ? hlslpp::float4x4(jfgViewDrawData->prevViewTransforms[jfgViewTransforms]) : cur;
+            const float w = std::clamp(jfgFrameWeight, 0.0f, 1.0f);
+            hlslpp::float4x4 view = cur;
+            for (uint32_t r = 0; r < 4; r++) {
+                for (uint32_t c = 0; c < 4; c++) {
+                    view[r][c] = float(prev[r][c]) + (float(cur[r][c]) - float(prev[r][c])) * w;
+                }
+            }
+
+            const hlslpp::float4x4 inverse = hlslpp::inverse(view);
+            for (uint32_t r = 0; r < 4; r++) {
+                jfgFrameData[0].viewToWorld[r] = { float(inverse[r][0]), float(inverse[r][1]), float(inverse[r][2]), float(inverse[r][3]) };
+            }
+        }
+
+        jfgViewDrawData = nullptr;
+        jfgViewTransforms = UINT32_MAX;
+
         uploadJfgMaterials(worker); // JFG PORT
 
         bool shaderViewRtEnabled = false;
@@ -2831,10 +2866,18 @@ namespace RT64 {
         };
 
         // JFG PORT: the shadow maps' triangles (never empty for the upload) and their atlas.
-        if (jfgShadowIndices.empty()) {
+        if (jfgShadowIndices.empty() && jfgShadowObjectIndices.empty()) {
             jfgShadowLights.clear();
+        }
+
+        if (jfgShadowIndices.empty()) {
             jfgShadowIndices.assign(3, 0);
         }
+
+        // ... with the characters' and objects' after the level's (recordJfgScene).
+        jfgShadowLevelIndexCount = uint32_t(jfgShadowIndices.size());
+        jfgShadowIndices.insert(jfgShadowIndices.end(), jfgShadowObjectIndices.begin(), jfgShadowObjectIndices.end());
+        jfgShadowObjectIndices.clear();
 
         shaderUploads.push_back({ jfgShadowIndices.data(), { 0, jfgShadowIndices.size() }, sizeof(uint32_t),
             RenderBufferFlag::INDEX | (worker->device->getCapabilities().raytracing ? RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT : RenderBufferFlag::NONE), { }, &jfgShadowIndicesBuffer });
@@ -3155,12 +3198,30 @@ namespace RT64 {
         RenderDevice *device = worker->device;
         RenderBuffer *worldPos = outputBuffers->jfgWorldPosBuffer.buffer.get();
         RenderBuffer *indices = jfgShadowIndicesBuffer.defaultBuffer.get();
+        // Two parts: the level, opaque, and the characters and objects after it, not opaque, so rays that should only see
+        // the level (the sky occlusion's) can pass through them while every other ray takes them as opaque (FORCE_OPAQUE).
         const uint32_t vertexCount = uint32_t(outputBuffers->jfgWorldPosBuffer.allocatedSize / (sizeof(float) * 4));
-        const RenderBottomLevelASMesh mesh(RenderBufferReference(indices), RenderBufferReference(worldPos), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT,
-            uint32_t(jfgShadowIndices.size()), vertexCount, sizeof(float) * 4, true);
+        const uint32_t levelCount = std::min(jfgShadowLevelIndexCount, uint32_t(jfgShadowIndices.size()));
+        const uint32_t objectCount = uint32_t(jfgShadowIndices.size()) - levelCount;
+        RenderBottomLevelASMesh meshes[2];
+        uint32_t meshCount = 0;
+        if (levelCount >= 3) {
+            meshes[meshCount++] = RenderBottomLevelASMesh(RenderBufferReference(indices), RenderBufferReference(worldPos), RenderFormat::R32_UINT,
+                RenderFormat::R32G32B32_FLOAT, levelCount, vertexCount, sizeof(float) * 4, true);
+        }
+
+        if (objectCount >= 3) {
+            meshes[meshCount++] = RenderBottomLevelASMesh(RenderBufferReference(indices, uint64_t(levelCount) * sizeof(uint32_t)), RenderBufferReference(worldPos),
+                RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, objectCount, vertexCount, sizeof(float) * 4, false);
+        }
+
+        if (meshCount == 0) {
+            meshes[meshCount++] = RenderBottomLevelASMesh(RenderBufferReference(indices), RenderBufferReference(worldPos), RenderFormat::R32_UINT,
+                RenderFormat::R32G32B32_FLOAT, 3, vertexCount, sizeof(float) * 4, true);
+        }
 
         RenderBottomLevelASBuildInfo bottomInfo;
-        device->setBottomLevelASBuildInfo(bottomInfo, &mesh, 1, true, false);
+        device->setBottomLevelASBuildInfo(bottomInfo, meshes, meshCount, true, false);
         // A buffer outgrown is kept for a few frames, as the GPU may still be using it for the frames before.
         jfgSceneFrame++;
         while (!jfgRetired.empty() && (jfgSceneFrame - jfgRetired.front().first > 8)) {

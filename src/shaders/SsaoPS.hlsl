@@ -21,6 +21,47 @@
 
 [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
 
+#ifdef JFG_RAY_QUERY
+#include "shared/rt64_jfg_light.h"
+
+// JFG PORT: ray-traced ambient occlusion (FramebufferRenderer::recordJfgScene): the pixel's surface is put in the world with
+// the level camera's view to world (jfgFrame) and rays are traced around it against the frame's scene, within the radius;
+// and sky occlusion: long rays upwards from it, darkening what doesn't see the open sky (under roofs and overhangs, in
+// tunnels). The same output, so the blur pass smooths the rays' noise as it does the screen-space samples'.
+StructuredBuffer<JfgFrame> jfgFrame : register(t70, space0);
+RaytracingAccelerationStructure jfgScene : register(t74, space0);
+
+float jfgRayHit(float3 origin, float3 dir, float tMax) {
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = 0.5f;
+    ray.TMax = tMax;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> query;
+    query.TraceRayInline(jfgScene, RAY_FLAG_NONE, 0xFF, ray);
+    while (query.Proceed()) { }
+    return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? query.CommittedRayT() : -1.0f;
+}
+
+// The same for the level alone: characters and objects are the scene's non-opaque part, passed through.
+bool jfgRayLevelOpen(float3 origin, float3 dir, float tMax) {
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = 0.5f;
+    ray.TMax = tMax;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+    query.TraceRayInline(jfgScene, RAY_FLAG_NONE, 0xFF, ray);
+    while (query.Proceed()) { } // non-opaque candidates are never committed
+    return query.CommittedStatus() != COMMITTED_TRIANGLE_HIT;
+}
+
+float3 jfgToWorld(float3 v, float w) {
+    const JfgFrame f = jfgFrame[0];
+    return f.viewToWorld[0].xyz * v.x + f.viewToWorld[1].xyz * v.y + f.viewToWorld[2].xyz * v.z + f.viewToWorld[3].xyz * w;
+}
+#endif
+
 #if defined(MULTISAMPLING)
 Texture2DMS<float> gBackgroundDepth : register(t2, space3);
 float loadDepth(int2 p) {
@@ -107,6 +148,66 @@ void PSMain(
     if (dot(N, -P) < 0.0f) {
         N = -N;
     }
+
+#ifdef JFG_RAY_QUERY
+    {
+        // Into the world (this pass's view space has z towards the scene; OpenGL's looks down -z), pushed off the surface.
+        const float3 worldP = jfgToWorld(float3(P.x, P.y, -P.z), 1.0f);
+        const float3 worldN = normalize(jfgToWorld(float3(N.x, N.y, -N.z), 0.0f));
+        const float3 origin = worldP + worldN * (1.0f + 0.002f * P.z);
+        const float3 helper = (abs(worldN.y) < 0.99f) ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+        const float3 tangent = normalize(cross(helper, worldN));
+        const float3 bitangent = cross(worldN, tangent);
+        const float rayNoise = frac(52.9829189f * frac(dot(float2(p) + jfgFrame[0].rays.z * 5.588238f, float2(0.06711056f, 0.00583715f))));
+        float rayOcclusion = 0.0f;
+        const uint RayCount = (radius > 0.0f) ? 8 : 0;
+        for (uint r = 0; r < RayCount; r++) {
+            // Cosine weighted over the hemisphere, turned by the pixel's noise (a different set each frame).
+            const float u1 = frac((float(r) + 0.5f) / float(RayCount) + rayNoise);
+            const float u2 = frac(float(r) * 0.618034f + rayNoise * 7.123f);
+            const float sr = sqrt(u1);
+            const float phi = u2 * 6.2831853f;
+            const float3 dir = normalize(tangent * (sr * cos(phi)) + bitangent * (sr * sin(phi)) + worldN * sqrt(max(1.0f - u1, 0.0f)));
+            const float t = jfgRayHit(origin, dir, radius);
+            if (t >= 0.0f) {
+                rayOcclusion += 1.0f - t / radius;
+            }
+        }
+
+        float lightReaching = (RayCount > 0) ? saturate(1.0f - strength * rayOcclusion / float(RayCount)) : 1.0f;
+
+        // Sky occlusion: whether the sky above the spot is open. Six rays over the hemisphere around straight up (cosine
+        // weighted), those in front of the surface counting; the share that gets out (none of the level within the sky
+        // distance; characters and objects don't count, or one would shade itself). What is under cover is darkened,
+        // the open isn't, whichever way a surface faces.
+        const JfgFrame frame = jfgFrame[0];
+        if (frame.occlusion.z > 0.0f) {
+            const float3 skyUp = float3(0.0f, 1.0f, 0.0f);
+            const float3 skyT = float3(1.0f, 0.0f, 0.0f);
+            const float3 skyB = float3(0.0f, 0.0f, 1.0f);
+            float counted = 0.0f;
+            float open = 0.0f;
+            for (uint k = 0; k < 6; k++) {
+                const float u1 = frac((float(k) + 0.5f) / 6.0f + rayNoise * 3.17f);
+                const float u2 = frac(float(k) * 0.618034f + rayNoise * 5.31f);
+                const float sr = sqrt(u1);
+                const float phi = u2 * 6.2831853f;
+                const float3 dir = normalize(skyT * (sr * cos(phi)) + skyB * (sr * sin(phi)) + skyUp * sqrt(max(1.0f - u1, 0.0f)));
+                if (dot(dir, worldN) > 0.0f) {
+                    counted += 1.0f;
+                    open += jfgRayLevelOpen(origin, dir, frame.occlusion.w) ? 1.0f : 0.0f;
+                }
+            }
+
+            if (counted > 0.0f) {
+                lightReaching *= saturate(lerp(1.0f, open / counted, frame.occlusion.z));
+            }
+        }
+
+        resultColor.r = lightReaching;
+        return;
+    }
+#endif
 
     // Sample disc: radius in pixels from the world radius at this distance.
     const float pixelsPerUnit = (size.y * 0.5f) / (P.z * tanHalf);

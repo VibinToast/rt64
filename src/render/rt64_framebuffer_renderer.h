@@ -113,6 +113,8 @@ namespace RT64 {
         static const uint32_t JfgShadowRows = 4;
         RenderPipeline *jfgShadowPipeline = nullptr;
         std::vector<uint32_t> jfgShadowIndices;
+        std::vector<uint32_t> jfgShadowObjectIndices; // characters' and objects' casters, put after the level's (endFramebuffers)
+        uint32_t jfgShadowLevelIndexCount = 0; // ... how many of jfgShadowIndices are the level's
         struct JfgShadowCandidate {
             uint32_t start, end, transformsIndex;
             bool level;
@@ -127,6 +129,10 @@ namespace RT64 {
         bool jfgShadowAtlasReadable = false;
         // JFG PORT: ray-traced shadows (recordJfgScene): on for this frame, and the acceleration structures' buffers.
         bool jfgRayFrame = false;
+        RenderPipeline *ssaoRayPipeline = nullptr; // ray-traced ambient occlusion (SsaoPS with JFG_RAY_QUERY)
+        const DrawData *jfgViewDrawData = nullptr; // the level's camera this frame (endFramebuffers)
+        uint32_t jfgViewTransforms = UINT32_MAX;
+        float jfgFrameWeight = 1.0f;
         std::unique_ptr<RenderBuffer> jfgBottomBuffer, jfgBottomScratch, jfgTopBuffer, jfgTopScratch, jfgInstancesBuffer;
         uint64_t jfgBottomCapacity = 0, jfgBottomScratchCapacity = 0, jfgTopCapacity = 0, jfgTopScratchCapacity = 0;
         std::unique_ptr<RenderAccelerationStructure> jfgBottomAS, jfgTopAS;

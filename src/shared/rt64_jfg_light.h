@@ -50,6 +50,11 @@ namespace interop {
         float4 rays;        // ray-traced shadows: x = the lights' size (radius, world units; 0 = hard edges), y = the
                             // directional light's angular radius (radians), z = the frame's number (turns the sampling
                             // pattern each frame), w = unused
+        float4 occlusion;   // ray-traced (SsaoPS): x = ambient occlusion's reach (world units; 0 = off), y = its strength
+                            // (0-2), z = sky occlusion's strength (0-2; 0 = off), w = how far a ray must go to count as
+                            // seeing the sky
+        float4 viewToWorld[4]; // the level camera's view space to the world (rows: world = x r0 + y r1 + z r2 + r3, view
+                               // space as OpenGL's, looking down -z), placed on in-between frames (SsaoPS ray-traced AO)
     };
 #ifdef HLSL_CPU
 };

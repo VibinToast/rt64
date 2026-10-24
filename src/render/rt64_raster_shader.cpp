@@ -39,6 +39,8 @@
 #   include "shaders/RasterPSDynamicMS.hlsl.dxil.h"
 #   include "shaders/RasterPSDynamicRQ.hlsl.dxil.h"
 #   include "shaders/RasterPSDynamicRQMS.hlsl.dxil.h"
+#   include "shaders/SsaoPSRQ.hlsl.dxil.h"
+#   include "shaders/SsaoPSRQMS.hlsl.dxil.h"
 #   include "shaders/RasterVSDynamic.hlsl.dxil.h"
 #   include "shaders/PostBlendDitherNoiseAddPS.hlsl.dxil.h"
 #   include "shaders/PostBlendDitherNoiseSubPS.hlsl.dxil.h"
@@ -646,6 +648,16 @@ namespace RT64 {
             ssaoDesc.vertexShader = ssaoVertexShader.get();
             ssaoDesc.pixelShader = ssaoPixelShader.get();
             ssaoPipeline = device->createGraphicsPipeline(ssaoDesc);
+
+#   ifdef _WIN32
+            // JFG PORT: the same pass with ray-traced occlusion (SsaoPS with JFG_RAY_QUERY).
+            if ((shaderFormat == RenderShaderFormat::DXIL) && device->getCapabilities().rayQuery) {
+                std::unique_ptr<RenderShader> ssaoRayPixelShader = useMSAA ? device->createShader(SsaoPSRQMSBlobDXIL, std::size(SsaoPSRQMSBlobDXIL), "PSMain", shaderFormat)
+                    : device->createShader(SsaoPSRQBlobDXIL, std::size(SsaoPSRQBlobDXIL), "PSMain", shaderFormat);
+                ssaoDesc.pixelShader = ssaoRayPixelShader.get();
+                ssaoRayPipeline = device->createGraphicsPipeline(ssaoDesc);
+            }
+#   endif
         }
 
         // JFG PORT: the faces of the lights' shadow cubes (JfgShadowVS.hlsl, FramebufferRenderer::recordJfgShadows):
