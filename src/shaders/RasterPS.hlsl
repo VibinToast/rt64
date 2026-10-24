@@ -786,7 +786,10 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             amount = saturate(jfgSpecularMap.r * rf.maps.y * rf.reflect.x * (0.04f + 0.96f * schlick));
         }
 
-        const bool water = ((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) && Blender::usesAlphaBlend(otherMode) && (rn.y > 0.7f);
+        // Water: blended, drawn as a see-through surface (the N64's translucent depth mode; ground layers blended on as
+        // decals don't count), actually see-through here, and facing up.
+        const bool water = ((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) && Blender::usesAlphaBlend(otherMode) && (otherMode.zMode() == ZMODE_XLU) &&
+            (resultColor.a < 0.9f) && (rn.y > 0.7f);
         float waterAmount = 0.0f;
         if (water && (rf.reflect.y > 0.0f)) {
             waterAmount = saturate(rf.reflect.y * (0.02f + 0.98f * schlick));

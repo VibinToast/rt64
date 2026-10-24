@@ -167,15 +167,16 @@ void CSMain(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID) {
             sum += gsCube[k][ray];
         }
 
-        const float3 estimate = (sum.w > 1e-4f) ? (sum.rgb / sum.w) : float3(0.0f, 0.0f, 0.0f);
+        float3 estimate = (sum.w > 1e-4f) ? (sum.rgb / sum.w) : float3(0.0f, 0.0f, 0.0f);
+        estimate = all(isfinite(estimate)) ? max(estimate, 0.0f) : float3(0.0f, 0.0f, 0.0f);
         const JfgProbe old = jfgProbes[slot];
-        const bool same = all(old.cell.xyz == cell) && (old.cell.w != 0);
+        const bool same = all(old.cell.xyz == cell) && (old.cell.w == JFG_PROBE_WRITTEN) && all(isfinite(old.cube[ray].rgb));
         const float keep = same ? saturate(f.gi.z) : 0.0f;
         jfgProbes[slot].cube[ray] = float4(lerp(estimate, old.cube[ray].rgb, keep), 1.0f);
     }
 
     GroupMemoryBarrierWithGroupSync();
     if (ray == 0) {
-        jfgProbes[slot].cell = int4(cell, 1);
+        jfgProbes[slot].cell = int4(cell, JFG_PROBE_WRITTEN);
     }
 }

@@ -8,6 +8,10 @@
 
 #pragma once
 
+// What a written probe's cell.w holds: the buffer starts with whatever was in that memory, and a probe only counts once
+// written (a plain nonzero mark could be there by chance).
+#define JFG_PROBE_WRITTEN 0x4A464701
+
 uint jfgProbeSlot(int3 cell) {
     const int3 size = int3(JFG_PROBES_X, JFG_PROBES_Y, JFG_PROBES_Z);
     const int3 m = ((cell % size) + size) % size;
@@ -54,7 +58,7 @@ float3 jfgProbeIrradiance(float3 p, float3 n, JfgFrame f) {
         }
 
         const JfgProbe probe = jfgProbes[jfgProbeSlot(cell)];
-        if (any(probe.cell.xyz != cell) || (probe.cell.w == 0)) {
+        if (any(probe.cell.xyz != cell) || (probe.cell.w != JFG_PROBE_WRITTEN)) {
             continue;
         }
 
@@ -67,5 +71,6 @@ float3 jfgProbeIrradiance(float3 p, float3 n, JfgFrame f) {
         weightSum += weight;
     }
 
-    return (weightSum > 1e-5f) ? (sum / weightSum) : float3(0.0f, 0.0f, 0.0f);
+    const float3 irradiance = (weightSum > 1e-5f) ? (sum / weightSum) : float3(0.0f, 0.0f, 0.0f);
+    return all(isfinite(irradiance)) ? max(irradiance, 0.0f) : float3(0.0f, 0.0f, 0.0f);
 }
