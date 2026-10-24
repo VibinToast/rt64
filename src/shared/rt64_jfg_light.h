@@ -47,6 +47,9 @@ namespace interop {
         float4 maps;        // how much each kind of authored material map counts (0 = off): x = normal maps,
                             // y = specular maps, z = emission maps; w = how much the frame's lights on the level take
                             // each surface's own colour (its vertex colour's hue)
+        float4 rays;        // ray-traced shadows: x = the lights' size (radius, world units; 0 = hard edges), y = the
+                            // directional light's angular radius (radians), z = the frame's number (turns the sampling
+                            // pattern each frame), w = unused
     };
 #ifdef HLSL_CPU
 };

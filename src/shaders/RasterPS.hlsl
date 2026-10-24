@@ -51,6 +51,45 @@ float jfgRayLit(float3 p, float3 n, float3 target, float gap) {
     query.Proceed();
     return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
 }
+
+// The pixel being shaded (RasterPS sets it), for the sampling pattern.
+static float2 jfgPixel = float2(0.0f, 0.0f);
+
+// Interleaved gradient noise (0-1) at a pixel, moved each frame so the pattern's grain changes from frame to frame.
+float jfgNoise(float2 pixel, float frame) {
+    pixel += frame * 5.588238f;
+    return frac(52.9829189f * frac(dot(pixel, float2(0.06711056f, 0.00583715f))));
+}
+
+// How much of a light of the given radius around target reaches p (0-1): rays to points over a disc facing p, sixteen
+// on a golden-angle spiral turned by the pixel's noise. Four spread over the disc first; only where they disagree (a
+// shadow's edge) the other twelve, so lit and fully shadowed pixels cost four rays.
+float jfgRaySoft(float3 p, float3 n, float3 target, float gap, float radius) {
+    if (radius <= 0.01f) {
+        return jfgRayLit(p, n, target, gap);
+    }
+
+    const float3 dir = normalize(target - p);
+    const float3 helper = (abs(dir.y) < 0.99f) ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    const float3 right = normalize(cross(helper, dir));
+    const float3 up = cross(dir, right);
+    const float turn = jfgNoise(jfgPixel, jfgFrame[0].rays.z) * 6.2831853f;
+    float lit = 0.0f;
+    float count = 0.0f;
+    for (uint i = 0; i < 16; i++) {
+        if ((i == 4) && ((lit == 0.0f) || (lit == 4.0f))) {
+            break;
+        }
+
+        const uint k = ((i & 3) << 2) | (i >> 2); // 0, 4, 8, 12 first: spread from the middle to the edge
+        const float r = radius * sqrt((float(k) + 0.5f) / 16.0f);
+        const float a = float(k) * 2.39996323f + turn;
+        lit += jfgRayLit(p, n, target + (right * cos(a) + up * sin(a)) * r, gap);
+        count += 1.0f;
+    }
+
+    return lit / count;
+}
 #endif
 
 // JFG PORT: the share of the shadow map around pos (texels, in a size x size area at origin) that is not nearer than
@@ -94,7 +133,7 @@ float jfgShadowVisibility(float3 p, float3 n, JfgLight light, float darkness) {
     }
 
     const float3 rayTarget = light.posRadius.xyz + float3(0.0f, JFG_SHADOW_LIFT, 0.0f);
-    return 1.0f - darkness * (1.0f - jfgRayLit(p, n, rayTarget, max(light.shadow.y, 12.0f)));
+    return 1.0f - darkness * (1.0f - jfgRaySoft(p, n, rayTarget, max(light.shadow.y, 12.0f), jfgFrame[0].rays.x));
 #endif
     const uint row = uint(light.shadow.x + 0.5f);
     if ((row == 0) || (darkness <= 0.0f)) {
@@ -135,7 +174,8 @@ float jfgSunVisibility(float3 p, float3 n, float darkness) {
 
 #ifdef JFG_RAY_QUERY
     // Ray-traced: towards the light, as far as its shadow map's depth range reaches.
-    return 1.0f - darkness * (1.0f - jfgRayLit(p, n, p + f.sunDir.xyz * (2.0f * f.extra.y), 0.0f));
+    const float sunReach = 2.0f * f.extra.y;
+    return 1.0f - darkness * (1.0f - jfgRaySoft(p, n, p + f.sunDir.xyz * sunReach, 0.0f, sunReach * tan(f.rays.y)));
 #endif
 
     uint width, height;
@@ -301,6 +341,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     const bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
     const bool zSourcePrim = (otherMode.zSource() == G_ZS_PRIM);
     int2 pixelPosSeed = floor(vertexPosition.xy);
+#ifdef JFG_RAY_QUERY
+    jfgPixel = vertexPosition.xy; // JFG PORT: the soft shadows' sampling pattern
+#endif
     uint randomSeed = initRand(FrParams.frameCount, instanceIndex * pixelPosSeed.y * pixelPosSeed.x, 16); // TODO: Review seed.
 
     // The F3D family of microcodes has a bug where polygons are clipped earlier than expected despite the depth being computed
