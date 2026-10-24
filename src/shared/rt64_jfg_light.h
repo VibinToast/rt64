@@ -45,7 +45,8 @@ namespace interop {
         float4 characters;  // x = shine strength on characters and objects, y = its sharpness, z = unused, w = how
                             // bright the lighting tool's highlighted texture pulses now (0-1)
         float4 maps;        // how much each kind of authored material map counts (0 = off): x = normal maps,
-                            // y = specular maps, z = emission maps
+                            // y = specular maps, z = emission maps; w = how much the frame's lights on the level take
+                            // each surface's own colour (its vertex colour's hue)
     };
 #ifdef HLSL_CPU
 };

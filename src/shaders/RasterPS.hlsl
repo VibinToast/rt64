@@ -534,6 +534,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
         }
 
+        // The surface's own colour (maps.w): the light added takes the hue of the level's colours there (at full
+        // brightness), so blue water lit by a white light stays blue when the ambient is down; nearly black colours
+        // have no hue to give and leave the light as it is.
+        const float shadePeak = max(shadeColor.r, max(shadeColor.g, shadeColor.b));
+        const float3 shadeHue = lerp(float3(1.0f, 1.0f, 1.0f), shadeColor.rgb / max(shadePeak, 0.001f), smoothstep(0.01f, 0.05f, shadePeak));
+        added *= lerp(float3(1.0f, 1.0f, 1.0f), shadeHue, saturate(jfgF.maps.w));
+
         const float3 own = shadeColor.rgb * ambient * painted;
         shadeColor.rgb = saturate(max(own - removed, own * 0.2f) + added);
     }

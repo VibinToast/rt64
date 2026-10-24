@@ -2797,7 +2797,7 @@ namespace RT64 {
 
         frame.sunShadow = jfgSunShadow;
         frame.characters = { params[17], params[18], 0.0f, rt64_jfg_highlight_amount.load(std::memory_order_relaxed) };
-        frame.maps = { params[15], params[20], params[19], 0.0f };
+        frame.maps = { params[15], params[20], params[19], params[21] };
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
