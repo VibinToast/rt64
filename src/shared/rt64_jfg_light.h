@@ -49,7 +49,7 @@ namespace interop {
                             // each surface's own colour (its vertex colour's hue)
         float4 rays;        // ray-traced shadows: x = the lights' size (radius, world units; 0 = hard edges), y = the
                             // directional light's angular radius (radians), z = the frame's number (turns the sampling
-                            // pattern each frame), w = unused
+                            // pattern each frame), w = the ray-saving shortcuts on (1)
         float4 occlusion;   // ray-traced (SsaoPS): x = ambient occlusion's reach (world units; 0 = off), y = its strength
                             // (0-2), z = sky occlusion's strength (0-2; 0 = off), w = how far a ray must go to count as
                             // seeing the sky

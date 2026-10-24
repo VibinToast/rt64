@@ -2868,7 +2868,9 @@ namespace RT64 {
         frame.characters = { params[17], params[18], 0.0f, rt64_jfg_highlight_amount.load(std::memory_order_relaxed) };
         frame.maps = { params[15], params[20], params[19], params[21] };
         static uint32_t jfgFrameNumber = 0;
-        frame.rays = { params[22], params[23], float(jfgFrameNumber++ & 0xFFFF), 0.0f };
+        // rays.w: the ray-saving shortcuts on (RasterPS); RT64_JFG_RAY_NO_SAVINGS=1 turns them off, for comparing.
+        static const bool jfgRayNoSavings = std::getenv("RT64_JFG_RAY_NO_SAVINGS") != nullptr;
+        frame.rays = { params[22], params[23], float(jfgFrameNumber++ & 0xFFFF), jfgRayNoSavings ? 0.0f : 1.0f };
         frame.occlusion = { params[24], params[25], params[26], params[27] };
         // Ray-traced indirect light: the probe grid around the camera (JfgProbes.hlsli), and the sky's light.
         const float giSpacing = std::max(params[29], 16.0f);

@@ -107,8 +107,9 @@ float jfgRayLit(float3 p, float3 n, float3 target, float gap) {
     return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
 }
 
-// The pixel being shaded (RasterPS sets it), for the sampling pattern.
+// The pixel being shaded (RasterPS sets it), for the sampling pattern, and how far from the camera it is.
 static float2 jfgPixel = float2(0.0f, 0.0f);
+static float jfgViewDistance = 0.0f;
 
 // Interleaved gradient noise (0-1) at a pixel, moved each frame so the pattern's grain changes from frame to frame.
 float jfgNoise(float2 pixel, float frame) {
@@ -118,9 +119,11 @@ float jfgNoise(float2 pixel, float frame) {
 
 // How much of a light of the given radius around target reaches p (0-1): rays to points over a disc facing p, sixteen
 // on a golden-angle spiral turned by the pixel's noise. Four spread over the disc first; only where they disagree (a
-// shadow's edge) the other twelve, so lit and fully shadowed pixels cost four rays.
+// shadow's edge) the other twelve, so lit and fully shadowed pixels cost four rays (two first left a dither along the
+// edges, where some pixels stopped early and their neighbours didn't). Far from the camera (where a soft edge is
+// narrower than a pixel) one ray to the light's middle.
 float jfgRaySoft(float3 p, float3 n, float3 target, float gap, float radius) {
-    if (radius <= 0.01f) {
+    if ((radius <= 0.01f) || ((jfgViewDistance > 2500.0f) && (jfgFrame[0].rays.w > 0.5f))) {
         return jfgRayLit(p, n, target, gap);
     }
 
@@ -188,7 +191,13 @@ float jfgShadowVisibility(float3 p, float3 n, JfgLight light, float darkness) {
     }
 
     const float3 rayTarget = light.posRadius.xyz + float3(0.0f, JFG_SHADOW_LIFT, 0.0f);
-    return 1.0f - darkness * (1.0f - jfgRaySoft(p, n, rayTarget, max(light.shadow.y, 12.0f), jfgFrame[0].rays.x));
+    // Soft edges only for a light bright here (a dim one's soft edge doesn't show): one ray for the others.
+    const float radius = light.posRadius.w;
+    const float d = distance(light.posRadius.xyz, p);
+    const float inner = min(light.colorInner.w, radius - 1.0f);
+    const float strength = max(light.colorInner.r, max(light.colorInner.g, light.colorInner.b)) * saturate((radius - d) / max(radius - inner, 1.0f));
+    const float size = ((strength > 0.15f) || (jfgFrame[0].rays.w < 0.5f)) ? jfgFrame[0].rays.x : 0.0f;
+    return 1.0f - darkness * (1.0f - jfgRaySoft(p, n, rayTarget, max(light.shadow.y, 12.0f), size));
 #endif
     const uint row = uint(light.shadow.x + 0.5f);
     if ((row == 0) || (darkness <= 0.0f)) {
@@ -398,6 +407,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     int2 pixelPosSeed = floor(vertexPosition.xy);
 #ifdef JFG_RAY_QUERY
     jfgPixel = vertexPosition.xy; // JFG PORT: the soft shadows' sampling pattern
+    jfgViewDistance = distance(jfgFrame[0].camera.xyz, vertexWorldPos.xyz);
 #endif
     uint randomSeed = initRand(FrParams.frameCount, instanceIndex * pixelPosSeed.y * pixelPosSeed.x, 16); // TODO: Review seed.
 
@@ -611,8 +621,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
                     const float inner = min(light.colorInner.w, radius - 1.0f);
                     const float3 l = toLight / max(d, 0.001f);
                     const float towards = saturate(dot(nb, l));
-                    const float visibility = jfgShadowVisibility(vertexWorldPos.xyz, n, light, darkness);
-                    const float3 lit = light.colorInner.rgb * saturate((radius - d) / (radius - inner)) * visibility;
+                    // No shadow rays for a light too weak here to show one (JFG_RAY_QUERY: they cost).
+                    const float reach = saturate((radius - d) / (radius - inner));
+                    const float strength = max(light.colorInner.r, max(light.colorInner.g, light.colorInner.b)) * reach * share;
+                    const float visibility = ((strength > 0.004f) || (jfgFrame[0].rays.w < 0.5f)) ? jfgShadowVisibility(vertexWorldPos.xyz, n, light, darkness) : 1.0f;
+                    const float3 lit = light.colorInner.rgb * reach * visibility;
                     added += lit * lerp(1.0f, towards, facing);
                     jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, l, lit * share, jfgShineStrengthChar, jfgSharpnessChar);
                 }
@@ -645,8 +658,10 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
                 const float3 l = toLight / max(d, 0.001f);
                 const float towards = saturate(dot(jfgNormal, l));
                 const float relief = saturate(1.0f + dot(nb, l) - dot(jfgNormal, l)); // the detail's light and shade
-                const float visibility = jfgShadowVisibility(vertexWorldPos.xyz, jfgFlatNormal, light, darkness);
                 const float reach = saturate((radius - d) / (radius - inner));
+                // No shadow rays for a light too weak here to show one (JFG_RAY_QUERY: they cost).
+                const float strength = max(light.colorInner.r, max(light.colorInner.g, light.colorInner.b)) * reach;
+                const float visibility = ((strength > 0.004f) || (jfgFrame[0].rays.w < 0.5f)) ? jfgShadowVisibility(vertexWorldPos.xyz, jfgFlatNormal, light, darkness) : 1.0f;
                 const float3 lit = light.colorInner.rgb * reach * visibility;
                 added += lit * lerp(1.0f, towards, facing) * relief;
                 jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, l, lit, jfgShineStrength, jfgSharpness);
