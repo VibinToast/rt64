@@ -159,6 +159,7 @@ namespace RT64 {
         uint32_t jfgShadowMap;
         uint32_t jfgScene;
         uint32_t jfgProbes;
+        uint32_t jfgPicture;
         uint32_t gLinearWrapWrapSampler;
         uint32_t gLinearWrapMirrorSampler;
         uint32_t gLinearWrapClampSampler;
@@ -242,6 +243,7 @@ namespace RT64 {
             jfgShadowMap = builder.addTexture(73); // the lights' shadow cubes, one atlas (RasterPS, JfgShadow.hlsli)
             jfgScene = raytracing ? builder.addAccelerationStructure(74) : 0; // the shadow casters for ray-traced shadows (RasterPS)
             jfgProbes = raytracing ? builder.addStructuredBuffer(75) : 0; // the indirect light's probes (RasterPS, JfgProbes.hlsli)
+            jfgPicture = raytracing ? builder.addTexture(76) : 0; // the last frame's 3D picture, for ray-traced reflections (RasterPS)
             gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
             gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
             gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());

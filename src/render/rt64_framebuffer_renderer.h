@@ -136,6 +136,10 @@ namespace RT64 {
         std::unique_ptr<RenderBuffer> jfgProbeBuffer; // the indirect light's probes (recordJfgProbes)
         std::unique_ptr<JfgProbeDescriptorSet> jfgProbeSet;
         uint32_t jfgProbeFrame = 0;
+        float jfgViewTanHalfFovY = 0.0f; // the level camera's (endFramebuffers)
+        std::unique_ptr<RenderTexture> jfgReflectPicture; // the last frame's 3D picture for ray-traced reflections (t76)
+        uint32_t jfgReflectWidth = 0, jfgReflectHeight = 0;
+        RenderFormat jfgReflectFormat = RenderFormat::UNKNOWN;
         std::unique_ptr<RenderBuffer> jfgBottomBuffer, jfgBottomScratch, jfgTopBuffer, jfgTopScratch, jfgInstancesBuffer;
         uint64_t jfgBottomCapacity = 0, jfgBottomScratchCapacity = 0, jfgTopCapacity = 0, jfgTopScratchCapacity = 0;
         std::unique_ptr<RenderAccelerationStructure> jfgBottomAS, jfgTopAS;

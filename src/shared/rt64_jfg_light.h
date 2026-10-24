@@ -59,6 +59,9 @@ namespace interop {
                             // z = how much of a probe's light is kept each frame (0-1), w = on (1)
         float4 giOrigin;    // xyz = the probe grid's first cell (the camera's cell minus half the grid), w = unused
         float4 sky;         // rgb = the sky's colour, w = its strength, for the probes' rays that get out (sky light)
+        float4 reflect;     // ray-traced reflections: x = on shiny surfaces (specular maps; 0 = off), y = on water (0 = off),
+                            // z = the level camera's tan(half the vertical field of view), w = the last picture is there (1)
+        float4 worldToView[4]; // the level camera's world to view space (rows, as viewToWorld), for finding a point in it
     };
 
     // JFG PORT: an irradiance probe of the ray-traced indirect light (JfgProbeCS.hlsl): the light coming from the six

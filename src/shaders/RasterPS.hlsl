@@ -32,6 +32,58 @@ RaytracingAccelerationStructure jfgScene : register(t74, space0);
 // ... and the indirect light's probes (FramebufferRenderer::recordJfgProbes, JfgProbes.hlsli).
 StructuredBuffer<JfgProbe> jfgProbes : register(t75, space0);
 #include "JfgProbes.hlsli"
+// ... and the last frame's 3D picture, before fog, glow and the HUD (FramebufferRenderer copyReflectPicture).
+Texture2D<float4> jfgPicture : register(t76, space0);
+
+// How far along a ray the nearest surface is, or -1 when there is none within tMax.
+float jfgRayDistance(float3 origin, float3 dir, float tMax) {
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = 0.5f;
+    ray.TMax = tMax;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> query;
+    query.TraceRayInline(jfgScene, RAY_FLAG_NONE, 0xFF, ray);
+    while (query.Proceed()) { }
+    return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? query.CommittedRayT() : -1.0f;
+}
+
+// What a mirror at p facing n shows (rgb) and how sure that is (a): the reflected ray traced into the scene. Where it
+// hits something the camera saw last frame (in the picture, and nothing between the camera and it), that picture's
+// colour there, less sure towards the picture's edge; where it gets out, the sky's colour; anything else (hidden or
+// off the picture) isn't known, and the surface keeps its own look there rather than show a guess.
+float4 jfgReflection(float3 p, float3 n, JfgFrame f) {
+    const float3 v = normalize(p - f.camera.xyz);
+    const float3 r = reflect(v, n);
+    const float3 origin = p + n * 1.5f;
+    const float t = jfgRayDistance(origin, r, 6000.0f);
+    if (t < 0.0f) {
+        return float4(f.sky.rgb * max(f.sky.w, 0.5f), 1.0f);
+    }
+
+    const float3 hit = origin + r * t;
+    if (f.reflect.w > 0.5f) {
+        const float3 view = f.worldToView[0].xyz * hit.x + f.worldToView[1].xyz * hit.y + f.worldToView[2].xyz * hit.z + f.worldToView[3].xyz;
+        const float depth = -view.z; // OpenGL view space looks down -z
+        if (depth > 1.0f) {
+            uint width, height;
+            jfgPicture.GetDimensions(width, height);
+            const float aspect = float(width) / float(height);
+            const float2 ndc = float2(view.x / (depth * aspect * f.reflect.z), view.y / (depth * f.reflect.z));
+            const float edge = saturate((1.0f - max(abs(ndc.x), abs(ndc.y))) * 8.0f);
+            if (edge > 0.0f) {
+                const float3 toHit = hit - f.camera.xyz;
+                const float seen = length(toHit);
+                if (jfgRayDistance(f.camera.xyz, toHit / seen, seen - 2.0f) < 0.0f) {
+                    const float2 uv = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
+                    return float4(jfgPicture.SampleLevel(gLinearClampClampSampler, uv, 0).rgb, edge);
+                }
+            }
+        }
+    }
+
+    return float4(0.0f, 0.0f, 0.0f, 0.0f);
+}
 
 // 1 when nothing is between p and target, else 0. The ray starts a little off p's surface on the target's side and
 // stops gap short of the target (a lamp's own model around its light).
@@ -706,6 +758,33 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     resultColor = Blender::run(otherMode, rp.flags, blInputs, combinerColor, false);
     resultColor.rgb += jfgSpecular; // JFG PORT: shine goes on top of the texture, not into it
     resultColor.rgb += jfgEmission * jfgFrame[0].maps.z; // JFG PORT: ... and so does an emission map's light
+#ifdef JFG_RAY_QUERY
+    // JFG PORT: ray-traced reflections: on surfaces with a specular map (its strength, Schlick's Fresnel from 4 %) and on
+    // water (the level's see-through surfaces facing up, Fresnel from 2 %, made more opaque where they reflect).
+    if ((vertexWorldPos.w > 0.5f) && ((jfgFrame[0].reflect.x > 0.0f) || (jfgFrame[0].reflect.y > 0.0f))) {
+        const JfgFrame rf = jfgFrame[0];
+        const float3 rn = normalize(jfgShadedNormal);
+        const float cosView = saturate(dot(rn, normalize(rf.camera.xyz - vertexWorldPos.xyz)));
+        const float schlick = pow(1.0f - cosView, 5.0f);
+        float amount = 0.0f;
+        if (jfgHasSpecularMap && (rf.reflect.x > 0.0f)) {
+            amount = saturate(jfgSpecularMap.r * rf.maps.y * rf.reflect.x * (0.04f + 0.96f * schlick));
+        }
+
+        const bool water = ((gConstants.padding.x & RASTER_JFG_LEVEL) != 0) && Blender::usesAlphaBlend(otherMode) && (rn.y > 0.7f);
+        float waterAmount = 0.0f;
+        if (water && (rf.reflect.y > 0.0f)) {
+            waterAmount = saturate(rf.reflect.y * (0.02f + 0.98f * schlick));
+            amount = max(amount, waterAmount);
+        }
+
+        if (amount > 0.004f) {
+            const float4 mirrored = jfgReflection(vertexWorldPos.xyz, rn, rf);
+            resultColor.rgb = lerp(resultColor.rgb, mirrored.rgb, amount * mirrored.a);
+            resultColor.a = lerp(resultColor.a, 1.0f, waterAmount * mirrored.a);
+        }
+    }
+#endif
     if (jfgHighlight) { // JFG PORT: the lighting tool's picked or selected texture pulses brighter
         resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 1.0f, 1.0f), jfgFrame[0].characters.w * 0.75f);
     }

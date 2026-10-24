@@ -752,6 +752,8 @@ namespace RT64 {
         // behind them changes. Nothing is moved across a fill (clear) or a draw without depth test.
         const bool targetsPresent = (fbStorage->colorTarget != nullptr) && (fbStorage->depthTarget != nullptr);
         // JFG PORT: ray-traced ambient occlusion goes through the same pass (SsaoPS with JFG_RAY_QUERY), in place of the screen-space one.
+        const bool jfgRayReflect = jfgRayFrame && !jfgFrameData.empty() &&
+            ((float(jfgFrameData[0].reflect.x) > 0.0f) || (float(jfgFrameData[0].reflect.y) > 0.0f));
         const bool jfgRayAO = jfgRayFrame && (ssaoRayPipeline != nullptr) && !jfgFrameData.empty() &&
             ((float(jfgFrameData[0].occlusion.x) > 0.0f) || (float(jfgFrameData[0].occlusion.z) > 0.0f));
         const bool ssaoOn = ((rt64_jfg_ssao.load(std::memory_order_relaxed) != 0) || jfgRayAO) && (ssaoPipeline != nullptr) && (ssaoBlurPipeline != nullptr) &&
@@ -844,7 +846,7 @@ namespace RT64 {
 
                 fogScene = fogWanted && fullHeight && !gameFog;
                 vignetteScene = vignetteWanted && fullHeight;
-                if (bloomOn || fogScene || vignetteScene) {
+                if (bloomOn || fogScene || vignetteScene || jfgRayReflect) { // JFG PORT: reflections copy the picture there
                     effectsPosition = hudPosition;
                 }
             }
@@ -904,6 +906,51 @@ namespace RT64 {
                 drawOrder.insert(drawOrder.begin() + effectsPosition, EffectsMarker);
             }
         }
+        // JFG PORT: ray-traced reflections (RasterPS, t76) take their colour from the 3D picture as it is here, before fog,
+        // glow, vignette and the HUD, the frame after: copied (resolved when multisampled) into a texture of its own.
+        auto copyReflectPicture = [&]() {
+            RenderTarget *colorTarget = fbStorage->colorTarget;
+            const uint32_t width = colorTarget->width;
+            const uint32_t height = colorTarget->height;
+            if ((jfgReflectPicture == nullptr) || (jfgReflectWidth != width) || (jfgReflectHeight != height) || (jfgReflectFormat != colorTarget->format)) {
+                if (jfgReflectPicture != nullptr) {
+                    bloomSnapshotRetired.emplace_back(std::move(jfgReflectPicture));
+                }
+
+                RenderClearValue clear = RenderClearValue::Color(RenderColor(), colorTarget->format);
+                jfgReflectPicture = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, colorTarget->format, RenderMultisampling(), &clear));
+                if (jfgReflectPicture == nullptr) {
+                    return;
+                }
+
+                jfgReflectPicture->setName("JFG Reflection Picture");
+                jfgReflectWidth = width;
+                jfgReflectHeight = height;
+                jfgReflectFormat = colorTarget->format;
+                descCommonSet->setTexture(descCommonSet->jfgPicture, jfgReflectPicture.get(), RenderTextureLayout::SHADER_READ);
+            }
+
+            if (colorTarget->multisampling.sampleCount > 1) {
+                worker->commandList->barriers(RenderBarrierStage::COPY, {
+                    RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::RESOLVE_SOURCE),
+                    RenderTextureBarrier(jfgReflectPicture.get(), RenderTextureLayout::RESOLVE_DEST)
+                });
+                worker->commandList->resolveTexture(jfgReflectPicture.get(), colorTarget->texture.get());
+            }
+            else {
+                worker->commandList->barriers(RenderBarrierStage::COPY, {
+                    RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COPY_SOURCE),
+                    RenderTextureBarrier(jfgReflectPicture.get(), RenderTextureLayout::COPY_DEST)
+                });
+                worker->commandList->copyTexture(jfgReflectPicture.get(), colorTarget->texture.get());
+            }
+
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, {
+                RenderTextureBarrier(jfgReflectPicture.get(), RenderTextureLayout::SHADER_READ),
+                RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE)
+            });
+        };
+
         // JFG PORT: keep the scene as it is now, before fog, glow and vignette go on (see bloomSnapshots): the next scene for this
         // colour buffer starts from it, so the parts the game does not draw again do not get the effects added again and again.
         auto takeSnapshot = [&]() {
@@ -1124,6 +1171,10 @@ namespace RT64 {
         };
         // Right before the HUD: save the clean picture, then fog (so bloom glows over the fogged scene), bloom, vignette.
         auto submitEffects = [&]() {
+            if (jfgRayReflect) {
+                copyReflectPicture(); // JFG PORT
+            }
+
             takeSnapshot();
             if (fogScene) {
                 submitFog();
@@ -2503,6 +2554,7 @@ namespace RT64 {
                         if (call.callDesc.jfgLevel && (proj.type == Projection::Type::Perspective)) {
                             jfgViewTransforms = proj.transformsIndex; // JFG PORT: the level's camera (endFramebuffers)
                             jfgViewDrawData = &drawData;
+                            jfgViewTanHalfFovY = projTanHalfFovY;
                         }
 
                         // JFG PORT: an object the game draws unlit (see jfgSolidWorlds); lit models are told apart in
@@ -2824,6 +2876,7 @@ namespace RT64 {
         frame.giOrigin = { floorf(float(camera.x) / giSpacing) - float(JFG_PROBES_X / 2), floorf(float(camera.y) / giSpacing) - float(JFG_PROBES_Y / 2),
             floorf(float(camera.z) / giSpacing) - float(JFG_PROBES_Z / 2), 0.0f };
         frame.sky = { params[32], params[33], params[34], params[30] };
+        frame.reflect = { params[35], params[36], 0.0f, 0.0f }; // z and w in endFramebuffers
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
@@ -2855,7 +2908,15 @@ namespace RT64 {
             const hlslpp::float4x4 inverse = hlslpp::inverse(view);
             for (uint32_t r = 0; r < 4; r++) {
                 jfgFrameData[0].viewToWorld[r] = { float(inverse[r][0]), float(inverse[r][1]), float(inverse[r][2]), float(inverse[r][3]) };
+                jfgFrameData[0].worldToView[r] = { float(view[r][0]), float(view[r][1]), float(view[r][2]), float(view[r][3]) };
             }
+
+            // Ray-traced reflections find where a point is in the last frame's picture with the same camera.
+            jfgFrameData[0].reflect.z = jfgViewTanHalfFovY;
+            jfgFrameData[0].reflect.w = ((jfgReflectPicture != nullptr) && (jfgViewTanHalfFovY > 0.0f)) ? 1.0f : 0.0f;
+        }
+        else {
+            jfgFrameData[0].reflect.w = 0.0f;
         }
 
         jfgViewDrawData = nullptr;
