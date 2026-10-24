@@ -3325,10 +3325,14 @@ namespace RT64 {
 
         grow(jfgBottomScratch, jfgBottomScratchCapacity, bottomInfo.scratchSize, RenderBufferDesc::DefaultBuffer(0, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
 
-        // Its inputs are read where shaders read them.
+        // Every buffer of a build is marked for the compute stage (which takes in the acceleration structure builds) before
+        // it, so the barrier after it waits for the build: plume's Vulkan barriers wait for the stage of the barrier before
+        // on the same buffer (on Vulkan the shaders otherwise read a structure still being built: every ray hit).
         worker->commandList->barriers(RenderBarrierStage::COMPUTE, {
             RenderBufferBarrier(worldPos, RenderBufferAccess::READ),
-            RenderBufferBarrier(indices, RenderBufferAccess::READ)
+            RenderBufferBarrier(indices, RenderBufferAccess::READ),
+            RenderBufferBarrier(jfgBottomBuffer.get(), RenderBufferAccess::WRITE),
+            RenderBufferBarrier(jfgBottomScratch.get(), RenderBufferAccess::WRITE)
         });
 
         worker->commandList->buildBottomLevelAS(jfgBottomAS.get(), RenderBufferReference(jfgBottomScratch.get()), bottomInfo);
@@ -3354,8 +3358,14 @@ namespace RT64 {
         }
 
         grow(jfgTopScratch, jfgTopScratchCapacity, topInfo.scratchSize, RenderBufferDesc::DefaultBuffer(0, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, {
+            RenderBufferBarrier(jfgTopBuffer.get(), RenderBufferAccess::WRITE),
+            RenderBufferBarrier(jfgTopScratch.get(), RenderBufferAccess::WRITE)
+        });
+
         worker->commandList->buildTopLevelAS(jfgTopAS.get(), RenderBufferReference(jfgTopScratch.get()), RenderBufferReference(jfgInstancesBuffer.get()), topInfo);
-        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderBufferBarrier(jfgTopBuffer.get(), RenderBufferAccess::READ));
+        // Read by the raster shaders and by the probes' and occlusion's passes.
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderBufferBarrier(jfgTopBuffer.get(), RenderBufferAccess::READ));
         descCommonSet->setAccelerationStructure(descCommonSet->jfgScene, jfgTopAS.get());
     }
 

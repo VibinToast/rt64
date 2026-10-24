@@ -504,14 +504,20 @@ endif()
 
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING")
-# JFG PORT: the ubershader with ray-traced shadows (RayQuery needs shader model 6.5; D3D12 only for now).
+# JFG PORT: the ray tracing shaders (RayQuery needs shader model 6.5, and Vulkan 1.2 for SPIR-V): the ubershader with
+# ray-traced lighting, the ray-traced ambient occlusion pass and the indirect light's probes.
+set (DXC_PS_RQ_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_5")
+set (DXC_CS_RQ_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_5")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/RasterPSDynamicRQ.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D JFG_RAY_QUERY" "-fspv-target-env=vulkan1.2")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/RasterPSDynamicRQMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" "-D JFG_RAY_QUERY" "-fspv-target-env=vulkan1.2")
+build_shader_spirv(rt64 "src/shaders/SsaoPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/SsaoPSRQ.hlsl" "-D JFG_RAY_QUERY" "-fspv-target-env=vulkan1.2")
+build_shader_spirv(rt64 "src/shaders/SsaoPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/SsaoPSRQMS.hlsl" "-D MULTISAMPLING" "-D JFG_RAY_QUERY" "-fspv-target-env=vulkan1.2")
+build_shader_spirv(rt64 "src/shaders/JfgProbeCS.hlsl" "${DXC_CS_RQ_OPTS}" "src/shaders/JfgProbeCS.hlsl" "-fspv-target-env=vulkan1.2")
 if (WIN32)
-    set (DXC_PS_RQ_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_5")
     build_shader_dxil(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/RasterPSDynamicRQ.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D JFG_RAY_QUERY")
     build_shader_dxil(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/RasterPSDynamicRQMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" "-D JFG_RAY_QUERY")
     build_shader_dxil(rt64 "src/shaders/SsaoPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/SsaoPSRQ.hlsl" "-D JFG_RAY_QUERY")
     build_shader_dxil(rt64 "src/shaders/SsaoPS.hlsl" "${DXC_PS_RQ_OPTS}" "src/shaders/SsaoPSRQMS.hlsl" "-D MULTISAMPLING" "-D JFG_RAY_QUERY")
-    set (DXC_CS_RQ_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_5")
     build_shader_dxil(rt64 "src/shaders/JfgProbeCS.hlsl" "${DXC_CS_RQ_OPTS}")
 endif()
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")

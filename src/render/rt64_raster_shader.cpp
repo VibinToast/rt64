@@ -9,6 +9,10 @@
 #include "shaders/RenderParams.hlsli.rw.h"
 #include "shaders/RasterPSDynamic.hlsl.spirv.h"
 #include "shaders/RasterPSDynamicMS.hlsl.spirv.h"
+#include "shaders/RasterPSDynamicRQ.hlsl.spirv.h"
+#include "shaders/RasterPSDynamicRQMS.hlsl.spirv.h"
+#include "shaders/SsaoPSRQ.hlsl.spirv.h"
+#include "shaders/SsaoPSRQMS.hlsl.spirv.h"
 #include "shaders/RasterPSSpecConstant.hlsl.spirv.h"
 #include "shaders/RasterPSSpecConstantMS.hlsl.spirv.h"
 #include "shaders/RasterPSSpecConstantFlat.hlsl.spirv.h"
@@ -519,15 +523,24 @@ namespace RT64 {
         creation.usesHDR = shaderLibrary->usesHDR;
         creation.multisampling = multisampling;
 
+        // JFG PORT: the ubershader with ray-traced lighting (getJfgRayPipeline).
+        if (device->getCapabilities().rayQuery) {
 #   ifdef _WIN32
-        // JFG PORT: the ubershader with ray-traced shadows (getJfgRayPipeline).
-        if ((shaderFormat == RenderShaderFormat::DXIL) && device->getCapabilities().rayQuery) {
-            jfgRayPixelShader = useMSAA ? device->createShader(RasterPSDynamicRQMSBlobDXIL, std::size(RasterPSDynamicRQMSBlobDXIL), "PSMain", shaderFormat)
-                : device->createShader(RasterPSDynamicRQBlobDXIL, std::size(RasterPSDynamicRQBlobDXIL), "PSMain", shaderFormat);
-            jfgRayCreation = creation;
-            jfgRayCreation.pixelShader = jfgRayPixelShader.get();
-        }
+            if (shaderFormat == RenderShaderFormat::DXIL) {
+                jfgRayPixelShader = useMSAA ? device->createShader(RasterPSDynamicRQMSBlobDXIL, std::size(RasterPSDynamicRQMSBlobDXIL), "PSMain", shaderFormat)
+                    : device->createShader(RasterPSDynamicRQBlobDXIL, std::size(RasterPSDynamicRQBlobDXIL), "PSMain", shaderFormat);
+            }
 #   endif
+            if (shaderFormat == RenderShaderFormat::SPIRV) {
+                jfgRayPixelShader = useMSAA ? device->createShader(RasterPSDynamicRQMSBlobSPIRV, std::size(RasterPSDynamicRQMSBlobSPIRV), "PSMain", shaderFormat)
+                    : device->createShader(RasterPSDynamicRQBlobSPIRV, std::size(RasterPSDynamicRQBlobSPIRV), "PSMain", shaderFormat);
+            }
+
+            if (jfgRayPixelShader != nullptr) {
+                jfgRayCreation = creation;
+                jfgRayCreation.pixelShader = jfgRayPixelShader.get();
+            }
+        }
 
         uint32_t threadIndex = 0;
         for (uint32_t i = 0; i < pipelineCount; i++) {
@@ -649,15 +662,25 @@ namespace RT64 {
             ssaoDesc.pixelShader = ssaoPixelShader.get();
             ssaoPipeline = device->createGraphicsPipeline(ssaoDesc);
 
-#   ifdef _WIN32
             // JFG PORT: the same pass with ray-traced occlusion (SsaoPS with JFG_RAY_QUERY).
-            if ((shaderFormat == RenderShaderFormat::DXIL) && device->getCapabilities().rayQuery) {
-                std::unique_ptr<RenderShader> ssaoRayPixelShader = useMSAA ? device->createShader(SsaoPSRQMSBlobDXIL, std::size(SsaoPSRQMSBlobDXIL), "PSMain", shaderFormat)
-                    : device->createShader(SsaoPSRQBlobDXIL, std::size(SsaoPSRQBlobDXIL), "PSMain", shaderFormat);
-                ssaoDesc.pixelShader = ssaoRayPixelShader.get();
-                ssaoRayPipeline = device->createGraphicsPipeline(ssaoDesc);
-            }
+            if (device->getCapabilities().rayQuery) {
+                std::unique_ptr<RenderShader> ssaoRayPixelShader;
+#   ifdef _WIN32
+                if (shaderFormat == RenderShaderFormat::DXIL) {
+                    ssaoRayPixelShader = useMSAA ? device->createShader(SsaoPSRQMSBlobDXIL, std::size(SsaoPSRQMSBlobDXIL), "PSMain", shaderFormat)
+                        : device->createShader(SsaoPSRQBlobDXIL, std::size(SsaoPSRQBlobDXIL), "PSMain", shaderFormat);
+                }
 #   endif
+                if (shaderFormat == RenderShaderFormat::SPIRV) {
+                    ssaoRayPixelShader = useMSAA ? device->createShader(SsaoPSRQMSBlobSPIRV, std::size(SsaoPSRQMSBlobSPIRV), "PSMain", shaderFormat)
+                        : device->createShader(SsaoPSRQBlobSPIRV, std::size(SsaoPSRQBlobSPIRV), "PSMain", shaderFormat);
+                }
+
+                if (ssaoRayPixelShader != nullptr) {
+                    ssaoDesc.pixelShader = ssaoRayPixelShader.get();
+                    ssaoRayPipeline = device->createGraphicsPipeline(ssaoDesc);
+                }
+            }
         }
 
         // JFG PORT: the faces of the lights' shadow cubes (JfgShadowVS.hlsl, FramebufferRenderer::recordJfgShadows):

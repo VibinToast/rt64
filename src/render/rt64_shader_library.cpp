@@ -19,6 +19,7 @@
 #include "shaders/FbWriteDepthCSMS.hlsl.spirv.h"
 #include "shaders/GaussianFilterRGB3x3CS.hlsl.spirv.h"
 #include "shaders/BoxFilterCS.hlsl.spirv.h"
+#include "shaders/JfgProbeCS.hlsl.spirv.h"
 #include "shaders/BicubicScalingCS.hlsl.spirv.h"
 #include "shaders/HistogramAverageCS.hlsl.spirv.h"
 #include "shaders/HistogramClearCS.hlsl.spirv.h"
@@ -522,21 +523,29 @@ namespace RT64 {
             rspProcess.pipeline = device->createComputePipeline(pipelineDesc);
         }
 
+        // JFG PORT: the ray-traced indirect light's probes (JfgProbeCS.hlsl, shader model 6.5 for RayQuery).
+        if (deviceCapabilities.rayQuery) {
+            std::unique_ptr<RenderShader> computeShader;
 #   ifdef _WIN32
-        // JFG PORT: the ray-traced indirect light's probes (JfgProbeCS.hlsl, shader model 6.5 for RayQuery; D3D12 only).
-        if ((shaderFormat == RenderShaderFormat::DXIL) && deviceCapabilities.rayQuery) {
-            JfgProbeDescriptorSet descriptorSet;
-            layoutBuilder.begin();
-            layoutBuilder.addPushConstant(0, 0, sizeof(uint32_t) * 4, RenderShaderStageFlag::COMPUTE);
-            layoutBuilder.addDescriptorSet(descriptorSet);
-            layoutBuilder.end();
-            jfgProbe.pipelineLayout = layoutBuilder.create(device);
-
-            std::unique_ptr<RenderShader> computeShader = device->createShader(JfgProbeCSBlobDXIL, std::size(JfgProbeCSBlobDXIL), "CSMain", shaderFormat);
-            RenderComputePipelineDesc pipelineDesc(jfgProbe.pipelineLayout.get(), computeShader.get(), 32, 1, 1);
-            jfgProbe.pipeline = device->createComputePipeline(pipelineDesc);
-        }
+            if (shaderFormat == RenderShaderFormat::DXIL) {
+                computeShader = device->createShader(JfgProbeCSBlobDXIL, std::size(JfgProbeCSBlobDXIL), "CSMain", shaderFormat);
+            }
 #   endif
+            if (shaderFormat == RenderShaderFormat::SPIRV) {
+                computeShader = device->createShader(JfgProbeCSBlobSPIRV, std::size(JfgProbeCSBlobSPIRV), "CSMain", shaderFormat);
+            }
+
+            if (computeShader != nullptr) {
+                JfgProbeDescriptorSet descriptorSet;
+                layoutBuilder.begin();
+                layoutBuilder.addPushConstant(0, 0, sizeof(uint32_t) * 4, RenderShaderStageFlag::COMPUTE);
+                layoutBuilder.addDescriptorSet(descriptorSet);
+                layoutBuilder.end();
+                jfgProbe.pipelineLayout = layoutBuilder.create(device);
+                RenderComputePipelineDesc pipelineDesc(jfgProbe.pipelineLayout.get(), computeShader.get(), 32, 1, 1);
+                jfgProbe.pipeline = device->createComputePipeline(pipelineDesc);
+            }
+        }
 
         // RSP Smooth Normal.
         {
