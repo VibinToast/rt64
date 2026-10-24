@@ -5,6 +5,9 @@
 #include "rt64_render_target.h"
 
 #include <algorithm>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include "gbi/rt64_f3d.h"
 #include "shared/rt64_fb_common.h"
@@ -35,9 +38,41 @@ namespace RT64 {
 #if PRINT_CONSTRUCTOR_DESTRUCTOR
         fprintf(stdout, "~RenderTarget(0x%p)\n", this);
 #endif
+        jfgWaitForPresent();
+    }
+
+    // JFG PORT: see jfgPresentBegin.
+    namespace {
+        std::mutex jfgPresentMutex;
+        std::condition_variable jfgPresentCondition;
+        const RenderTarget *jfgPresentTarget = nullptr;
+        std::thread::id jfgPresentThread;
+    }
+
+    void RenderTarget::jfgPresentBegin(const RenderTarget *target) {
+        std::scoped_lock<std::mutex> lock(jfgPresentMutex);
+        jfgPresentTarget = target;
+        jfgPresentThread = std::this_thread::get_id();
+    }
+
+    void RenderTarget::jfgPresentEnd() {
+        {
+            std::scoped_lock<std::mutex> lock(jfgPresentMutex);
+            jfgPresentTarget = nullptr;
+        }
+
+        jfgPresentCondition.notify_all();
+    }
+
+    void RenderTarget::jfgWaitForPresent() const {
+        std::unique_lock<std::mutex> lock(jfgPresentMutex);
+        jfgPresentCondition.wait(lock, [&]() {
+            return (jfgPresentTarget != this) || (jfgPresentThread == std::this_thread::get_id());
+        });
     }
 
     void RenderTarget::releaseTextures() {
+        jfgWaitForPresent();
         textureView.reset();
         resolvedTextureView.reset();
         texture.reset();

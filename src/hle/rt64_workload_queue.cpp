@@ -301,7 +301,15 @@ namespace RT64 {
             targetManager.destroyAll();
             fbManager.destroyAllTileCopies();
             ext.sharedResources->fbConfigChanged = false;
-            ext.sharedResources->interpolatedColorTargets.clear();
+            {
+                // JFG PORT: the present queue picks its interpolated targets from the list under this lock. They are destroyed
+                // after it, as that waits for a target being presented (RenderTarget::jfgPresentBegin).
+                std::vector<std::unique_ptr<RenderTarget>> oldTargets;
+                {
+                    std::scoped_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
+                    oldTargets.swap(ext.sharedResources->interpolatedColorTargets);
+                }
+            }
         }
 
         if (ext.sharedResources->userConfigChanged) {
@@ -1203,6 +1211,7 @@ namespace RT64 {
                 const bool usesHDR = ext.sharedResources->renderTargetManager.usesHDR;
                 uint32_t requiredFrames = (usingMSAA && generateInterpolatedFrames) ? displayFrames : (displayFrames - 1);
                 if ((requiredFrames > 0) && (interpolatedTargets.size() < requiredFrames)) {
+                    std::scoped_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex); // JFG PORT: see threadConfigurationUpdate (oldTargets)
                     uint32_t previousSize = uint32_t(interpolatedTargets.size());
                     interpolatedTargets.resize(requiredFrames);
                     for (uint32_t i = previousSize; i < requiredFrames; i++) {
