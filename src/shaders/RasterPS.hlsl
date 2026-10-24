@@ -29,6 +29,9 @@ Texture2D<float> jfgShadowMap : register(t73, space0);
 // JFG PORT: ray-traced shadows (FramebufferRenderer::recordJfgScene): the frame's shadow casters in the world, the level
 // and the characters and objects drawn through its camera.
 RaytracingAccelerationStructure jfgScene : register(t74, space0);
+// ... and the indirect light's probes (FramebufferRenderer::recordJfgProbes, JfgProbes.hlsli).
+StructuredBuffer<JfgProbe> jfgProbes : register(t75, space0);
+#include "JfgProbes.hlsli"
 
 // 1 when nothing is between p and target, else 0. The ray starts a little off p's surface on the target's side and
 // stops gap short of the target (a lamp's own model around its light).
@@ -525,6 +528,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         // level ambient scales both; the others come from nearby lights (torches, lamps) and are left as they are.
         const float levelAmbient = float(gConstants.padding.x >> 24) / 128.0f;
         float3 brightness = object.params.x * levelAmbient;
+#ifdef JFG_RAY_QUERY
+        brightness += jfgProbeIrradiance(vertexWorldPos.xyz, n, jfgF) * jfgF.gi.x; // ray-traced indirect light and sky light
+#endif
         for (uint k = 0; k < uint(object.params.y + 0.5f); k++) {
             const float scale = (k == 0) ? levelAmbient : 1.0f;
             const float3 dir = normalize(object.dirs[k].xyz);
@@ -618,6 +624,10 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
             added += sun * saturate(dot(nb, jfgF.sunDir.xyz));
             jfgSpecular += jfgShine(nb, vertexWorldPos.xyz, jfgF.sunDir.xyz, sun, jfgShineStrength, jfgSharpness);
         }
+
+#ifdef JFG_RAY_QUERY
+        added += jfgProbeIrradiance(vertexWorldPos.xyz, jfgNormal, jfgF) * jfgF.gi.x; // ray-traced indirect light and sky light
+#endif
 
         // The surface's own colour (maps.w): the light added takes the hue of the level's colours there (at full
         // brightness), so blue water lit by a white light stays blue when the ambient is down; nearly black colours

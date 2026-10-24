@@ -133,6 +133,9 @@ namespace RT64 {
         const DrawData *jfgViewDrawData = nullptr; // the level's camera this frame (endFramebuffers)
         uint32_t jfgViewTransforms = UINT32_MAX;
         float jfgFrameWeight = 1.0f;
+        std::unique_ptr<RenderBuffer> jfgProbeBuffer; // the indirect light's probes (recordJfgProbes)
+        std::unique_ptr<JfgProbeDescriptorSet> jfgProbeSet;
+        uint32_t jfgProbeFrame = 0;
         std::unique_ptr<RenderBuffer> jfgBottomBuffer, jfgBottomScratch, jfgTopBuffer, jfgTopScratch, jfgInstancesBuffer;
         uint64_t jfgBottomCapacity = 0, jfgBottomScratchCapacity = 0, jfgTopCapacity = 0, jfgTopScratchCapacity = 0;
         std::unique_ptr<RenderAccelerationStructure> jfgBottomAS, jfgTopAS;
@@ -209,6 +212,7 @@ namespace RT64 {
         void uploadJfgMaterials(RenderWorker *worker); // JFG PORT
         void recordJfgShadows(RenderWorker *worker); // JFG PORT
         void recordJfgScene(RenderWorker *worker, const OutputBuffers *outputBuffers); // JFG PORT: ray-traced shadows
+        void recordJfgProbes(RenderWorker *worker, const OutputBuffers *outputBuffers); // JFG PORT: ray-traced indirect light
         RenderDescriptorSet *makeBloomDescriptorSet(RenderWorker *worker, RenderTexture *texture, RenderTextureView *textureView);
         std::unique_ptr<FramebufferRendererDescriptorCommonSet> descCommonSet;
         std::unique_ptr<FramebufferRendererDescriptorTextureSet> descTextureSet;

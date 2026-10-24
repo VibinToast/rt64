@@ -43,6 +43,7 @@ namespace RT64 {
         ShaderRecord postProcess;
         ShaderRecord rspModify;
         ShaderRecord rspProcess;
+        ShaderRecord jfgProbe; // JFG PORT: the ray-traced indirect light's probes (when the device has inline ray queries)
         ShaderRecord rspSmoothNormal;
         ShaderRecord rspVertexTestZ;
         ShaderRecord rspVertexTestZMS;

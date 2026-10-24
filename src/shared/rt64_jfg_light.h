@@ -55,6 +55,20 @@ namespace interop {
                             // seeing the sky
         float4 viewToWorld[4]; // the level camera's view space to the world (rows: world = x r0 + y r1 + z r2 + r3, view
                                // space as OpenGL's, looking down -z), placed on in-between frames (SsaoPS ray-traced AO)
+        float4 gi;          // ray-traced indirect light (JfgProbes.hlsli): x = strength, y = probe spacing (world units),
+                            // z = how much of a probe's light is kept each frame (0-1), w = on (1)
+        float4 giOrigin;    // xyz = the probe grid's first cell (the camera's cell minus half the grid), w = unused
+        float4 sky;         // rgb = the sky's colour, w = its strength, for the probes' rays that get out (sky light)
+    };
+
+    // JFG PORT: an irradiance probe of the ray-traced indirect light (JfgProbeCS.hlsl): the light coming from the six
+    // directions (+x, -x, +y, -y, +z, -z; rgb), and the world cell it holds (w = 1 once written).
+#define JFG_PROBES_X 16
+#define JFG_PROBES_Y 8
+#define JFG_PROBES_Z 16
+    struct JfgProbe {
+        float4 cube[6];
+        int4 cell;
     };
 #ifdef HLSL_CPU
 };

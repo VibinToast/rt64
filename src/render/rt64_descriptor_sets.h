@@ -158,6 +158,7 @@ namespace RT64 {
         uint32_t jfgObjects;
         uint32_t jfgShadowMap;
         uint32_t jfgScene;
+        uint32_t jfgProbes;
         uint32_t gLinearWrapWrapSampler;
         uint32_t gLinearWrapMirrorSampler;
         uint32_t gLinearWrapClampSampler;
@@ -240,6 +241,7 @@ namespace RT64 {
             jfgObjects = builder.addStructuredBuffer(72); // how the frame's characters are lit (RasterPS)
             jfgShadowMap = builder.addTexture(73); // the lights' shadow cubes, one atlas (RasterPS, JfgShadow.hlsli)
             jfgScene = raytracing ? builder.addAccelerationStructure(74) : 0; // the shadow casters for ray-traced shadows (RasterPS)
+            jfgProbes = raytracing ? builder.addStructuredBuffer(75) : 0; // the indirect light's probes (RasterPS, JfgProbes.hlsli)
             gLinearWrapWrapSampler = builder.addImmutableSampler(7, samplerLibrary.linear.wrapWrap.get());
             gLinearWrapMirrorSampler = builder.addImmutableSampler(8, samplerLibrary.linear.wrapMirror.get());
             gLinearWrapClampSampler = builder.addImmutableSampler(9, samplerLibrary.linear.wrapClamp.get());
@@ -516,6 +518,31 @@ namespace RT64 {
             builder.begin();
             srcModifyPos = builder.addFormattedBuffer(1);
             screenPos = builder.addReadWriteStructuredBuffer(2);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
+    // JFG PORT: the ray-traced indirect light's probe update (JfgProbeCS.hlsl).
+    struct JfgProbeDescriptorSet : RenderDescriptorSetBase {
+        uint32_t scene;
+        uint32_t lights;
+        uint32_t frame;
+        uint32_t worldPos;
+        uint32_t indices;
+        uint32_t probes;
+
+        JfgProbeDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            scene = builder.addAccelerationStructure(1);
+            lights = builder.addStructuredBuffer(2);
+            frame = builder.addStructuredBuffer(3);
+            worldPos = builder.addByteAddressBuffer(4);
+            indices = builder.addByteAddressBuffer(5);
+            probes = builder.addReadWriteStructuredBuffer(6);
             builder.end();
 
             if (device != nullptr) {

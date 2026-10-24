@@ -65,6 +65,7 @@
 #   include "shaders/FbWriteDepthCSMS.hlsl.dxil.h"
 #   include "shaders/GaussianFilterRGB3x3CS.hlsl.dxil.h"
 #   include "shaders/BoxFilterCS.hlsl.dxil.h"
+#   include "shaders/JfgProbeCS.hlsl.dxil.h"
 #   include "shaders/BicubicScalingCS.hlsl.dxil.h"
 #   include "shaders/HistogramAverageCS.hlsl.dxil.h"
 #   include "shaders/HistogramClearCS.hlsl.dxil.h"
@@ -520,6 +521,22 @@ namespace RT64 {
             RenderComputePipelineDesc pipelineDesc(rspProcess.pipelineLayout.get(), computeShader.get(), 64, 1, 1);
             rspProcess.pipeline = device->createComputePipeline(pipelineDesc);
         }
+
+#   ifdef _WIN32
+        // JFG PORT: the ray-traced indirect light's probes (JfgProbeCS.hlsl, shader model 6.5 for RayQuery; D3D12 only).
+        if ((shaderFormat == RenderShaderFormat::DXIL) && deviceCapabilities.rayQuery) {
+            JfgProbeDescriptorSet descriptorSet;
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(uint32_t) * 4, RenderShaderStageFlag::COMPUTE);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            jfgProbe.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> computeShader = device->createShader(JfgProbeCSBlobDXIL, std::size(JfgProbeCSBlobDXIL), "CSMain", shaderFormat);
+            RenderComputePipelineDesc pipelineDesc(jfgProbe.pipelineLayout.get(), computeShader.get(), 32, 1, 1);
+            jfgProbe.pipeline = device->createComputePipeline(pipelineDesc);
+        }
+#   endif
 
         // RSP Smooth Normal.
         {

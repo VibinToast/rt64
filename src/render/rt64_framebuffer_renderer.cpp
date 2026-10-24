@@ -209,10 +209,10 @@ bool rt64_jfg_emission_colour(uint64_t hash, float *rgb) {
 //   16 the level's smooth surface directions on (0/1), 17 shine strength on characters, 18 its sharpness.
 //   19 how much emission maps count, 20 how much specular maps count (15: normal maps).
 static std::mutex jfgParamsMutex;
-static float jfgParams[32] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
+static float jfgParams[40] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 16.0f, 0.75f };
 void rt64_jfg_lighting_params(const float *params, uint32_t count) {
     std::lock_guard<std::mutex> lock(jfgParamsMutex);
-    memcpy(jfgParams, params, sizeof(float) * std::min(count, 32U));
+    memcpy(jfgParams, params, sizeof(float) * std::min(count, 40U));
 }
 std::atomic<float> rt64_jfg_level_ambient{ 1.0f }; // a scale on the level's own colours, its ambient light (RasterPS)
 std::atomic<float> rt64_jfg_vignette_strength{ 0.4f };
@@ -2000,6 +2000,7 @@ namespace RT64 {
         pendingUploaders = bufferUploaders;
         recordJfgShadows(worker); // JFG PORT: after the world positions and the uploads
         recordJfgScene(worker, outputBuffers); // JFG PORT: ... and the shadow casters for ray-traced shadows
+        recordJfgProbes(worker, outputBuffers); // JFG PORT: ... and the indirect light's probes
 
         if (!dynamicTextureBarrierVector.empty()) {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, dynamicTextureBarrierVector);
@@ -2753,7 +2754,7 @@ namespace RT64 {
         float nextDistance = -1.0f;
         for (interop::JfgLight &light : jfgLights) {
             const bool noShadows = float(light.shadow.w) > 0.5f; // set by the lighting tool
-            light.shadow = { 0.0f, 0.0f, 0.0f, 0.0f };
+            light.shadow = { 0.0f, 0.0f, 0.0f, noShadows ? 1.0f : 0.0f }; // w kept for ray-traced shadows
             if ((float(light.posRadius.w) <= 1.0f) || noShadows) {
                 continue;
             }
@@ -2769,7 +2770,7 @@ namespace RT64 {
             }
         }
 
-        float params[32];
+        float params[40];
         {
             std::lock_guard<std::mutex> lock(jfgParamsMutex);
             memcpy(params, jfgParams, sizeof(params));
@@ -2817,6 +2818,12 @@ namespace RT64 {
         static uint32_t jfgFrameNumber = 0;
         frame.rays = { params[22], params[23], float(jfgFrameNumber++ & 0xFFFF), 0.0f };
         frame.occlusion = { params[24], params[25], params[26], params[27] };
+        // Ray-traced indirect light: the probe grid around the camera (JfgProbes.hlsli), and the sky's light.
+        const float giSpacing = std::max(params[29], 16.0f);
+        frame.gi = { params[28], giSpacing, 0.92f, (params[28] > 0.0f) ? 1.0f : 0.0f };
+        frame.giOrigin = { floorf(float(camera.x) / giSpacing) - float(JFG_PROBES_X / 2), floorf(float(camera.y) / giSpacing) - float(JFG_PROBES_Y / 2),
+            floorf(float(camera.z) / giSpacing) - float(JFG_PROBES_Z / 2), 0.0f };
+        frame.sky = { params[32], params[33], params[34], params[30] };
         jfgFrameData.assign(1, frame);
 
         jfgLightCount = uint32_t(jfgLights.size());
@@ -3287,6 +3294,50 @@ namespace RT64 {
         worker->commandList->buildTopLevelAS(jfgTopAS.get(), RenderBufferReference(jfgTopScratch.get()), RenderBufferReference(jfgInstancesBuffer.get()), topInfo);
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderBufferBarrier(jfgTopBuffer.get(), RenderBufferAccess::READ));
         descCommonSet->setAccelerationStructure(descCommonSet->jfgScene, jfgTopAS.get());
+    }
+
+    // JFG PORT: ray-traced indirect light: every probe of the grid traces its rays (JfgProbeCS.hlsl), then the raster
+    // shaders read them (t75). The probes stay from frame to frame; they are made once.
+    void FramebufferRenderer::recordJfgProbes(RenderWorker *worker, const OutputBuffers *outputBuffers) {
+        RenderDevice *device = worker->device;
+        const bool giOn = jfgRayFrame && (jfgTopAS != nullptr) && (shaderLibrary->jfgProbe.pipeline != nullptr) && !jfgFrameData.empty() &&
+            (float(jfgFrameData[0].gi.w) > 0.5f);
+        if (jfgProbeBuffer == nullptr) {
+            if (!giOn) {
+                return;
+            }
+
+            const uint64_t size = uint64_t(sizeof(interop::JfgProbe)) * JFG_PROBES_X * JFG_PROBES_Y * JFG_PROBES_Z;
+            jfgProbeBuffer = device->createBuffer(RenderBufferDesc::DefaultBuffer(size, RenderBufferFlag::STORAGE | RenderBufferFlag::UNORDERED_ACCESS));
+            jfgProbeSet = std::make_unique<JfgProbeDescriptorSet>(device);
+        }
+
+        descCommonSet->setBuffer(descCommonSet->jfgProbes, jfgProbeBuffer.get(), RenderBufferStructuredView(sizeof(interop::JfgProbe)));
+        if (!giOn) {
+            return;
+        }
+
+        jfgProbeSet->setAccelerationStructure(jfgProbeSet->scene, jfgTopAS.get());
+        jfgProbeSet->setBuffer(jfgProbeSet->lights, jfgLightsBuffer.get(), RenderBufferStructuredView(sizeof(interop::JfgLight)));
+        jfgProbeSet->setBuffer(jfgProbeSet->frame, jfgFrameBuffer.get(), RenderBufferStructuredView(sizeof(interop::JfgFrame)));
+        jfgProbeSet->setBuffer(jfgProbeSet->worldPos, outputBuffers->jfgWorldPosBuffer.buffer.get(), outputBuffers->jfgWorldPosBuffer.allocatedSize);
+        jfgProbeSet->setBuffer(jfgProbeSet->indices, jfgShadowIndicesBuffer.get(), uint64_t(jfgShadowIndices.size()) * sizeof(uint32_t));
+        jfgProbeSet->setBuffer(jfgProbeSet->probes, jfgProbeBuffer.get(), RenderBufferStructuredView(sizeof(interop::JfgProbe)));
+
+        struct {
+            uint32_t lightCount;
+            uint32_t levelIndexCount;
+            uint32_t levelPart;
+            uint32_t frame;
+        } cb = { jfgLightCount, jfgShadowLevelIndexCount, (jfgShadowLevelIndexCount >= 3) ? 1U : 0U, jfgProbeFrame++ };
+
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(jfgProbeBuffer.get(), RenderBufferAccess::WRITE));
+        worker->commandList->setPipeline(shaderLibrary->jfgProbe.pipeline.get());
+        worker->commandList->setComputePipelineLayout(shaderLibrary->jfgProbe.pipelineLayout.get());
+        worker->commandList->setComputePushConstants(0, &cb);
+        worker->commandList->setComputeDescriptorSet(jfgProbeSet->get(), 0);
+        worker->commandList->dispatch(JFG_PROBES_X * JFG_PROBES_Y * JFG_PROBES_Z, 1, 1);
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderBufferBarrier(jfgProbeBuffer.get(), RenderBufferAccess::READ));
     }
 
     void FramebufferRenderer::recordJfgShadows(RenderWorker *worker) {
