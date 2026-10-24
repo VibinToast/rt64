@@ -4,7 +4,9 @@
 
 #include "rt64_state.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -166,6 +168,88 @@ bool rt64_jfg_picked(uint64_t *hash, uint32_t *width, uint32_t *height, uint32_t
     *height = jfgPickDone.height;
     *address = jfgPickDone.address;
     return true;
+}
+
+// JFG PORT: where textures with emission maps are drawn outside the level's own geometry (objects, characters and
+// effects drawn in 3D), for the lighting tool's lights from emission maps (src/jfg/jfg_lighting_tool.cpp; the level's
+// own come from its geometry there). Each such draw's triangles are put in the world with their vertices' world
+// matrices and grouped by texture in 128-unit cells, each with its area-weighted centre. A game frame's cells are
+// reported once the next frame starts; workloads without perspective draws (the shadow texture) don't count as frames.
+bool rt64_jfg_emission_colour(uint64_t hash, float *rgb); // src/render/rt64_framebuffer_renderer.cpp
+
+namespace {
+    struct JfgEmitterCell {
+        uint64_t hash = 0;
+        int64_t key = 0;
+        double x = 0.0, y = 0.0, z = 0.0, area = 0.0;
+    };
+
+    std::atomic<bool> jfgEmittersOn{ false };
+    std::mutex jfgEmittersMutex;
+    std::vector<JfgEmitterCell> jfgEmittersGathering, jfgEmittersDone;
+    uint64_t jfgEmittersFrame = UINT64_MAX;
+    bool jfgEmittersFrameDrawn = false; // the frame being gathered had perspective draws
+
+    void jfgEmittersFrameStart(uint64_t frame) {
+        std::lock_guard<std::mutex> lock(jfgEmittersMutex);
+        if (frame == jfgEmittersFrame) {
+            return;
+        }
+
+        if (jfgEmittersFrameDrawn) {
+            jfgEmittersDone.swap(jfgEmittersGathering);
+        }
+
+        jfgEmittersGathering.clear();
+        jfgEmittersFrame = frame;
+        jfgEmittersFrameDrawn = false;
+    }
+
+    void jfgEmittersAdd(uint64_t hash, const hlslpp::float3 &centre, float area) {
+        const float Cell = 128.0f;
+        const int64_t key = (int64_t(std::floor(float(centre.x) / Cell)) & 0xFFFFF) | ((int64_t(std::floor(float(centre.y) / Cell)) & 0xFFFFF) << 20) |
+            ((int64_t(std::floor(float(centre.z) / Cell)) & 0xFFFFF) << 40);
+
+        auto it = std::find_if(jfgEmittersGathering.begin(), jfgEmittersGathering.end(), [&](const JfgEmitterCell &c) {
+            return (c.hash == hash) && (c.key == key);
+        });
+
+        if (it == jfgEmittersGathering.end()) {
+            if (jfgEmittersGathering.size() >= 512) {
+                return;
+            }
+
+            jfgEmittersGathering.push_back({ hash, key });
+            it = jfgEmittersGathering.end() - 1;
+        }
+
+        it->x += float(centre.x) * area;
+        it->y += float(centre.y) * area;
+        it->z += float(centre.z) * area;
+        it->area += area;
+    }
+}
+
+void rt64_jfg_emitters(bool on) {
+    jfgEmittersOn.store(on, std::memory_order_relaxed);
+}
+
+// The last frame's cells, largest first: per cell its texture's hash, and x, y, z (game world) and area in xyza.
+uint32_t rt64_jfg_emitter_cells(uint64_t *hashes, float *xyza, uint32_t maxCells) {
+    std::lock_guard<std::mutex> lock(jfgEmittersMutex);
+    std::vector<JfgEmitterCell> cells = jfgEmittersDone;
+    std::sort(cells.begin(), cells.end(), [](const JfgEmitterCell &a, const JfgEmitterCell &b) { return a.area > b.area; });
+    const uint32_t count = std::min(uint32_t(cells.size()), maxCells);
+    for (uint32_t i = 0; i < count; i++) {
+        const JfgEmitterCell &c = cells[i];
+        hashes[i] = c.hash;
+        xyza[i * 4 + 0] = float(c.x / c.area);
+        xyza[i * 4 + 1] = float(c.y / c.area);
+        xyza[i * 4 + 2] = float(c.z / c.area);
+        xyza[i * 4 + 3] = float(c.area);
+    }
+
+    return count;
 }
 
 // JFG PORT: the game's dynamic lights (its track lights: muzzle flashes, lamps, glowing pickups) for each frame, keyed
@@ -1225,6 +1309,11 @@ namespace RT64 {
             }
         };
 
+        const bool jfgEmitters = jfgEmittersOn.load(std::memory_order_relaxed); // JFG PORT: see rt64_jfg_emitters
+        if (jfgEmitters) {
+            jfgEmittersFrameStart(workload.submissionFrame);
+        }
+
         for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
             const Projection &proj = fbPair.projections[p];
             for (uint32_t d = 0; d < proj.gameCallCount; d++) {
@@ -1562,6 +1651,52 @@ namespace RT64 {
                             hit.address = rdp->rice.lastLoadOpByTMEM[pickTile.loadTile.tmem].texture.address;
                             jfgPickConsider(fbPair.colorImage.address, hit);
                             break;
+                        }
+                    }
+                }
+
+                // JFG PORT: where a texture with an emission map is drawn outside the level's geometry (rt64_jfg_emitters).
+                if (jfgEmitters && (proj.type == Projection::Type::Perspective)) {
+                    {
+                        std::lock_guard<std::mutex> lock(jfgEmittersMutex);
+                        jfgEmittersFrameDrawn = true;
+                    }
+
+                    float emissionRgb[3];
+                    const DrawCallTile *emitterTile = (gameCall.callDesc.tileCount > 0) ? &workload.drawData.callTiles[gameCall.callDesc.tileIndex] : nullptr;
+                    if (!gameCall.callDesc.jfgLevel && (emitterTile != nullptr) && emitterTile->valid && !emitterTile->tileCopyUsed &&
+                        (emitterTile->tmemHashOrID != 0) && rt64_jfg_emission_colour(emitterTile->tmemHashOrID, emissionRgb))
+                    {
+                        const auto &drawData = workload.drawData;
+                        const std::vector<uint32_t> &faces = drawData.faceIndices;
+                        std::lock_guard<std::mutex> lock(jfgEmittersMutex);
+                        for (uint32_t t = 0; t < gameCall.callDesc.triangleCount; t++) {
+                            const size_t f = size_t(gameCall.meshDesc.faceIndicesStart) + t * 3;
+                            if ((f + 2) >= faces.size()) {
+                                break;
+                            }
+
+                            hlslpp::float3 world[3];
+                            bool valid = true;
+                            for (uint32_t i = 0; (i < 3) && valid; i++) {
+                                const uint32_t v = faces[f + i];
+                                valid = (v < drawData.worldIndices.size()) && ((size_t(v) * 3 + 2) < drawData.posFloats.size()) &&
+                                    (drawData.worldIndices[v] < drawData.worldTransforms.size());
+
+                                if (valid) {
+                                    const hlslpp::float4 model(drawData.posFloats[v * 3 + 0], drawData.posFloats[v * 3 + 1], drawData.posFloats[v * 3 + 2], 1.0f);
+                                    world[i] = hlslpp::mul(model, drawData.worldTransforms[drawData.worldIndices[v]]).xyz;
+                                }
+                            }
+
+                            if (!valid) {
+                                continue;
+                            }
+
+                            const float area = 0.5f * float(hlslpp::length(hlslpp::cross(world[1] - world[0], world[2] - world[0])));
+                            if (area >= 1.0f) {
+                                jfgEmittersAdd(emitterTile->tmemHashOrID, (world[0] + world[1] + world[2]) / 3.0f, area);
+                            }
                         }
                     }
                 }
