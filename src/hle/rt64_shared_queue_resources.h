@@ -23,6 +23,7 @@ namespace RT64 {
         uint32_t available = 0;
         uint32_t count = 0;
         bool skipped = false;
+        float jfgWeights[16] = {}; // JFG PORT: the interpolation weight each presented frame (by index) was rendered with
     };
 
     struct SharedQueueResources {

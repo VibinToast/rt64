@@ -58,6 +58,11 @@ namespace RT64 {
         std::vector<interop::float4x4> lerpWorldTransforms;
         std::vector<interop::RDPTile> rdpTiles;
         std::vector<interop::RDPTile> lerpRdpTiles;
+        // JFG PORT: the tiles of the character shadows' draws and the tile origin of their last game frame's place
+        // (uls/ult in quarter texels, relative to this frame's), so in-between frames slide the shadow image with the
+        // character (rt64_jfg_shadow_batch, GameFrame::match).
+        struct JfgShadowTile { uint32_t tileIndex; float dUls, dUlt; };
+        std::vector<JfgShadowTile> jfgShadowTiles;
         std::vector<interop::GPUTile> gpuTiles;
         std::vector<DrawCallTile> callTiles;
         std::vector<interop::RSPViewport> rspViewports;

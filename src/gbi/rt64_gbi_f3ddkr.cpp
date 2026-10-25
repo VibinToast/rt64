@@ -6,11 +6,58 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <vector>
 
 #include "hle/rt64_interpreter.h"
 #include "hle/rt64_rdp.h"
 #include "rt64_gbi_f3d.h"
 #include "rt64_gbi_extended.h"
+
+// JFG PORT: the character shadows' triangle batches of the last two game frames (the game double-buffers them) and how
+// far back each one's image slides on in-between frames: the shadow is drawn on fixed copies of the ground triangles,
+// and only their texture coordinates follow the character once per game frame, so without this it stepped ahead of
+// the interpolated character. Registered by the game thread (src/jfg/jfg_shadow_interp.cpp), read by the RSP.
+namespace {
+    struct JfgShadowBatch { uint32_t start, end; float dUls, dUlt; };
+    std::mutex jfgShadowMutex;
+    std::vector<JfgShadowBatch> jfgShadowBatches;
+}
+
+// [start, end): physical address range of the batch's triangles; dUls/dUlt: its tile origin one game frame back.
+void rt64_jfg_shadow_batch(uint32_t start, uint32_t end, float dUls, float dUlt) {
+    std::lock_guard<std::mutex> lock(jfgShadowMutex);
+    // A batch written over an older one's place (the buffer two game frames back) replaces it.
+    for (size_t i = 0; i < jfgShadowBatches.size(); ) {
+        const JfgShadowBatch &b = jfgShadowBatches[i];
+        if ((b.start < end) && (start < b.end)) {
+            jfgShadowBatches[i] = jfgShadowBatches.back();
+            jfgShadowBatches.pop_back();
+        }
+        else {
+            i++;
+        }
+    }
+    if (jfgShadowBatches.size() < 256) {
+        jfgShadowBatches.push_back({ start, end, dUls, dUlt });
+    }
+}
+
+static bool jfgShadowFind(uint32_t address, float &dUls, float &dUlt) {
+    static const bool disabled = std::getenv("RT64_JFG_NO_SHADOW_SLIDE") != nullptr; // kill switch: shadows step as before
+    if (disabled) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(jfgShadowMutex);
+    for (const JfgShadowBatch &b : jfgShadowBatches) {
+        if ((address >= b.start) && (address < b.end)) {
+            dUls = b.dUls;
+            dUlt = b.dUlt;
+            return true;
+        }
+    }
+    return false;
+}
 
 namespace RT64 {
     namespace GBI_F3DDKR {
@@ -57,6 +104,20 @@ namespace RT64 {
             const uint32_t count = (*dl)->p0(20, 4) + 1;
             const uint8_t textureOn = (*dl)->p0(16, 4);
             const uint32_t address = state->rsp->fromSegmentedMasked((*dl)->w1);
+
+            // JFG PORT: a character shadow's batch starts a draw call of its own, whose tiles remember how far the
+            // image slides (State::loadDrawState); so does the first batch after one.
+            if (state->rsp->DKR.jfg) {
+                float dUls = 0.0f, dUlt = 0.0f;
+                const bool shadow = jfgShadowFind(address, dUls, dUlt);
+                auto &dkr = state->rsp->DKR;
+                if ((shadow != dkr.jfgShadow) || (shadow && ((dUls != dkr.jfgShadowUls) || (dUlt != dkr.jfgShadowUlt)))) {
+                    dkr.jfgShadow = shadow;
+                    dkr.jfgShadowUls = dUls;
+                    dkr.jfgShadowUlt = dUlt;
+                    state->updateDrawStatusAttribute(DrawAttribute::Texture);
+                }
+            }
 
             auto &texture = state->rsp->textureState;
             // JFG PORT: setTexture() stores level + 1, so passing the stored value back raised the level count by one

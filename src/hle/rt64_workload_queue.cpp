@@ -301,7 +301,15 @@ namespace RT64 {
             targetManager.destroyAll();
             fbManager.destroyAllTileCopies();
             ext.sharedResources->fbConfigChanged = false;
-            ext.sharedResources->interpolatedColorTargets.clear();
+            {
+                // JFG PORT: the present queue picks its interpolated targets from the list under this lock. They are destroyed
+                // after it, as that waits for a target being presented (RenderTarget::jfgPresentBegin).
+                std::vector<std::unique_ptr<RenderTarget>> oldTargets;
+                {
+                    std::scoped_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
+                    oldTargets.swap(ext.sharedResources->interpolatedColorTargets);
+                }
+            }
         }
 
         if (ext.sharedResources->userConfigChanged) {
@@ -1203,6 +1211,7 @@ namespace RT64 {
                 const bool usesHDR = ext.sharedResources->renderTargetManager.usesHDR;
                 uint32_t requiredFrames = (usingMSAA && generateInterpolatedFrames) ? displayFrames : (displayFrames - 1);
                 if ((requiredFrames > 0) && (interpolatedTargets.size() < requiredFrames)) {
+                    std::scoped_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex); // JFG PORT: see threadConfigurationUpdate (oldTargets)
                     uint32_t previousSize = uint32_t(interpolatedTargets.size());
                     interpolatedTargets.resize(requiredFrames);
                     for (uint32_t i = previousSize; i < requiredFrames; i++) {
@@ -1263,6 +1272,12 @@ namespace RT64 {
                     else {
                         prevFrameWeight = 0.0f;
                         curFrameWeight = 1.0f;
+                    }
+
+                    {
+                        // JFG PORT: the weight of the frame the present queue will show at this index (rt64_jfg_present_info).
+                        const uint32_t presentIndex = !generateInterpolatedFrames ? 0 : usingMSAA ? (targetIndex - 1) : (frame > 0) ? targetIndex : 0;
+                        if (presentIndex < 16) curFrameCounters.jfgWeights[presentIndex] = generateInterpolatedFrames ? curFrameWeight : 1.0f;
                     }
 
                     const bool uploadExtras = (frame == 0) && workloadConfig.raytracingEnabled;
