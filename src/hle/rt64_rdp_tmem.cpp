@@ -154,7 +154,7 @@ namespace RT64 {
         const uint64_t DynamicWindowFrames = 30;
     };
 
-    bool TextureManager::dumpSourceIsDynamic(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, uint64_t creationFrame, DumpSource *&source) {
+    bool TextureManager::dumpSourceIsDynamic(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, uint64_t creationFrame, const std::filesystem::path &directory, DumpSource *&source) {
         const LoadOperation &loadOp = state->rdp->rice.lastLoadOpByTMEM[loadTile.tmem];
         const DumpSourceKey key(loadOp.texture.address, loadTile.fmt, loadTile.siz, width, height, tlut, loadTile.palette);
         auto inserted = dumpSources.emplace(key, DumpSource());
@@ -191,14 +191,15 @@ namespace RT64 {
 
         // Flagged: move what was already written aside (not deleted, so a false positive can be undone) and log why.
         src.dynamic = true;
-        const std::filesystem::path dynamicDirectory = state->dumpingTexturesDirectory / "_dynamic";
+        const std::filesystem::path dynamicDirectory = directory / "_dynamic";
         std::error_code ec;
         std::filesystem::create_directories(dynamicDirectory, ec);
         for (const std::filesystem::path &path : src.written) {
-            std::filesystem::rename(path, dynamicDirectory / path.filename(), ec);
+            std::filesystem::create_directories(path.parent_path() / "_dynamic", ec);
+            std::filesystem::rename(path, path.parent_path() / "_dynamic" / path.filename(), ec);
         }
 
-        FILE *log = fopen((state->dumpingTexturesDirectory / "dynamic_sources.txt").u8string().c_str(), "ab");
+        FILE *log = fopen((directory / "dynamic_sources.txt").u8string().c_str(), "ab");
         if (log != nullptr) {
             fprintf(log, "address %08x size %ux%u fmt %u siz %u tlut %u palette %u: %zu+ distinct textures, first frame %" PRIu64 ", flagged frame %" PRIu64 ", %zu files moved to _dynamic\n",
                 loadOp.texture.address, width, height, loadTile.fmt, loadTile.siz, tlut, loadTile.palette, src.hashes.size(), src.firstFrame, creationFrame, src.written.size());
@@ -239,7 +240,7 @@ namespace RT64 {
         return true;
     }
 
-    bool TextureManager::dumpTexturePng(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, std::filesystem::path &path) {
+    bool TextureManager::dumpTexturePng(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, const std::filesystem::path &directory, std::filesystem::path &path) {
         const uint32_t stride = uint32_t(loadTile.line) << 3;
         if ((width == 0) || (height == 0) || (width > 1024) || (height > 1024) || (stride == 0)) {
             return false;
@@ -291,7 +292,7 @@ namespace RT64 {
 
         char name[64];
         snprintf(name, sizeof(name), "%016" PRIx64 ".png", hash);
-        path = state->dumpingTexturesDirectory / name;
+        path = directory / name;
         const std::string pathString = path.u8string();
         if (stbi_write_png(pathString.c_str(), width, height, 4, pixels.data(), int(width) * 4) == 0) {
             return false;
@@ -305,7 +306,7 @@ namespace RT64 {
         const char *tlutName = (tlut == G_TT_RGBA16) ? "rgba16" : ((tlut == G_TT_IA16) ? "ia16" : "none");
         const bool CI4 = (loadTile.fmt == G_IM_FMT_CI) && (loadTile.siz == G_IM_SIZ_4b);
         const uint32_t src = state->rdp->rice.lastLoadOpByTMEM[loadTile.tmem].texture.address;
-        FILE *info = fopen((state->dumpingTexturesDirectory / "texture_info.txt").u8string().c_str(), "ab");
+        FILE *info = fopen((directory / "texture_info.txt").u8string().c_str(), "ab");
         if (info != nullptr) {
             fprintf(info, "tex %016" PRIx64 " fmt %s siz %u tlut %s pal %u line %u src %08x", hash, fmtName, 4U << loadTile.siz, tlutName, CI4 ? uint32_t(loadTile.palette) : 0U, uint32_t(loadTile.line), src);
             if ((loadTile.fmt == G_IM_FMT_CI) && (tlut > 0)) {
@@ -320,16 +321,41 @@ namespace RT64 {
         return true;
     }
 
+    // JFG PORT: where a texture's PNG goes: the folder the host gives for the RDRAM address it was loaded from (a mod's
+    // own texture, so a texture pack made from the dump keeps the game's textures apart from each mod's), else the dump
+    // folder. Each folder has its own _dynamic, texture_info.txt and dynamic_sources.txt.
+    std::filesystem::path TextureManager::dumpDirectory(State *state, const LoadTile &loadTile) {
+        if (!state->dumpingTexturesPng || !state->dumpingTexturesDirectoryFor) {
+            return state->dumpingTexturesDirectory;
+        }
+
+        const uint32_t src = state->rdp->rice.lastLoadOpByTMEM[loadTile.tmem].texture.address;
+        const std::filesystem::path directory = state->dumpingTexturesDirectoryFor(src);
+        if (directory.empty()) {
+            return state->dumpingTexturesDirectory;
+        }
+
+        if (dumpScannedDirectories.insert(directory).second) {
+            std::error_code ec;
+            std::filesystem::create_directories(directory, ec);
+            scanDumped(directory);
+        }
+
+        return directory;
+    }
+
     void TextureManager::resetDump(const std::filesystem::path &directory) {
         dumpedSet.clear();
         dumpSources.clear();
-
-        // JFG PORT: a dump continued in a folder that already holds PNGs (a new session) does not write those textures,
-        // or their texture_info.txt lines, again. Their names start with the hash, in the folder or _dynamic/.
-        if (directory.empty()) {
-            return;
+        dumpScannedDirectories.clear();
+        if (!directory.empty()) {
+            scanDumped(directory);
         }
+    }
 
+    // JFG PORT: a dump continued in a folder that already holds PNGs (a new session) does not write those textures, or
+    // their texture_info.txt lines, again. Their names start with the hash, in the folder or _dynamic/.
+    void TextureManager::scanDumped(const std::filesystem::path &directory) {
         std::error_code ec;
         for (const std::filesystem::path &folder : { directory, directory / "_dynamic" }) {
             for (std::filesystem::directory_iterator it(folder, ec), end; !ec && (it != end); it.increment(ec)) {
@@ -344,7 +370,8 @@ namespace RT64 {
     void TextureManager::dumpTexture(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, uint64_t creationFrame, bool savePNG) {
         // JFG PORT: textures the game redraws on most frames are not dumped (see dumpSourceIsDynamic). Only for PNG dumps.
         DumpSource *source = nullptr;
-        if (state->dumpingTexturesPng && state->dumpingTexturesSkipDynamic && dumpSourceIsDynamic(hash, state, loadTile, width, height, tlut, creationFrame, source)) {
+        const std::filesystem::path directory = dumpDirectory(state, loadTile);
+        if (state->dumpingTexturesPng && state->dumpingTexturesSkipDynamic && dumpSourceIsDynamic(hash, state, loadTile, width, height, tlut, creationFrame, directory, source)) {
             return;
         }
 
@@ -359,7 +386,7 @@ namespace RT64 {
         // what the "rt64" auto path of a replacement database matches on.
         if (state->dumpingTexturesPng) {
             std::filesystem::path path;
-            if (dumpTexturePng(hash, state, loadTile, width, height, tlut, path) && (source != nullptr)) {
+            if (dumpTexturePng(hash, state, loadTile, width, height, tlut, directory, path) && (source != nullptr)) {
                 source->written.push_back(path);
             }
 

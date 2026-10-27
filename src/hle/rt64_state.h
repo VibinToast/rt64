@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "xxHash/xxh3.h"
 
 #include "common/rt64_emulator_configuration.h"
@@ -37,6 +39,20 @@ namespace RT64 {
     struct Interpreter;
     
     const uint32_t RDRAMSize = 0x7FFFFF;
+
+    // JFG PORT: the RDRAM a recompiled game and its mods can address: the runtime commits 512 MB (KSEG0's size, librecomp
+    // recomp::mem_size), game memory first, then mod code, data and the mod heap from 0x81000000.
+    const uint32_t JFGAddressableRDRAM = 0x20000000U;
+
+    // JFG PORT: an address from Jet Force Gemini (or one of its mods) to a physical RDRAM offset: the hardware DMA mask
+    // (its low bits keep the alignment the game relies on), widened from 16 MB to the 512 MB the runtime commits. KSEG0 and
+    // KSEG1 pointers (0x80000000 / 0xA0000000 and up) lose their KSEG bits on the way, as on hardware. For the game's
+    // memory this gives the same addresses as DKR's 8 MB mask did; past 8 MB (mod code, data and heap from 0x81000000)
+    // it no longer wraps into the game's memory. No extended mode is needed (RT64's would take KSEG1 pointers as
+    // extended addresses).
+    inline uint32_t jfgPhysicalAddress(uint32_t address, uint32_t mask) {
+        return address & (mask | ((JFGAddressableRDRAM - 1) & ~0x00FFFFFFU));
+    }
 
     struct State {
         struct External {
@@ -117,6 +133,7 @@ namespace RT64 {
         std::filesystem::path dumpingTexturesDirectory;
         bool dumpingTexturesPng = false; // JFG PORT: dump each texture as <hash>.png only (decoded from TMEM), ready for a replacement pack, and log draw_trace.txt
         bool dumpingTexturesSkipDynamic = true; // JFG PORT: stop dumping sources that change on most frames (dynamic_sources.txt)
+        std::function<std::filesystem::path(uint32_t)> dumpingTexturesDirectoryFor; // JFG PORT: the host's folder for a texture loaded from this RDRAM address (a mod's own), empty for the dump folder
         std::string traceScene = "unknown"; // JFG PORT: the level or screen on screen, set by the host before each display list; stamped on every draw_trace.txt line
         uint32_t jfgDlStart = 0; // JFG PORT: the display list being processed (Application::processDisplayLists), for rt64_jfg_frame_lights
         // JFG PORT: the lit characters and objects of the display list being processed (rt64_jfg_frame_objects):
