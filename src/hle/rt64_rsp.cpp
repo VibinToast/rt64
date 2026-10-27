@@ -317,7 +317,10 @@ namespace RT64 {
 
     // Masks addresses as the RSP DMA hardware would.
     template<uint32_t mask> uint32_t RSP::maskPhysicalAddress(uint32_t address) {
-        if (DKR.force8MBAddressMask) {
+        if (DKR.jfg) {
+            return jfgPhysicalAddress(address, mask); // JFG PORT: game and mod memory, see rt64_state.h
+        }
+        else if (DKR.force8MBAddressMask) {
             return address & mask & DKRAddressMask;
         }
         else if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
@@ -330,7 +333,12 @@ namespace RT64 {
 
     // Performs a lookup in the segment table to convert the given address.
     uint32_t RSP::fromSegmented(uint32_t segAddress) {
-        if (!DKR.force8MBAddressMask && state->extended.extendRDRAM && ((segAddress & ExtendedMask) == ExtendedMask)) {
+        // JFG PORT: a KSEG pointer past the first 16 MB (mod memory, from 0x81000000) is an address, not segment + offset:
+        // its physical address. Below 16 MB (the game's memory) the segment table is used as before.
+        if (DKR.jfg && ((segAddress & 0x80000000U) != 0) && ((segAddress & 0x1F000000U) != 0)) {
+            return segAddress & (JFGAddressableRDRAM - 1);
+        }
+        else if (!DKR.force8MBAddressMask && state->extended.extendRDRAM && ((segAddress & ExtendedMask) == ExtendedMask)) {
             return segAddress;
         }
         else {

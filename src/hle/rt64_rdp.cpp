@@ -265,7 +265,10 @@ namespace RT64 {
     constexpr uint32_t ExtendedMask = 0x80000000U;
 
     uint32_t RDP::maskAddress(uint32_t address) {
-        if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
+        if (state->rsp->DKR.jfg) {
+            return jfgPhysicalAddress(address, RDP_ADDRESS_MASK); // JFG PORT: game and mod memory, see rt64_state.h
+        }
+        else if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
             return address - ExtendedMask;
         }
         else {
