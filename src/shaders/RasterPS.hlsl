@@ -107,6 +107,13 @@ float jfgRayLit(float3 p, float3 n, float3 target, float gap) {
     return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
 }
 
+// How much a ray-traced shadow counts for light reaching p's surface (n) from target: fading out as the light comes in
+// along the surface. Rays skimming the level's low-poly ground catch its own bumps and folds, which threw triangles of
+// shadow across it (the shadow maps' depth bias hid them).
+float jfgRayGraze(float3 p, float3 n, float3 target) {
+    return saturate((dot(n, normalize(target - p)) - 0.05f) * 5.0f);
+}
+
 // The pixel being shaded (RasterPS sets it), for the sampling pattern, and how far from the camera it is.
 static float2 jfgPixel = float2(0.0f, 0.0f);
 static float jfgViewDistance = 0.0f;
@@ -185,19 +192,22 @@ float jfgShadowLit(float2 pos, int2 origin, int size, float depth, bool lineariz
 // light without a cube (beyond the nearest few) casts no shadows. darkness: how dark a full shadow is (0-1).
 float jfgShadowVisibility(float3 p, float3 n, JfgLight light, float darkness) {
 #ifdef JFG_RAY_QUERY
-    // Ray-traced: every light that casts shadows (shadow.w = 1: it doesn't), a hard edge for now.
-    if ((light.shadow.w > 0.5f) || (darkness <= 0.0f)) {
-        return 1.0f;
-    }
+    // Ray-traced (characters.z: ray-traced shadows on; else the shadow maps below): every light that casts shadows
+    // (shadow.w = 1: it doesn't).
+    if (jfgFrame[0].characters.z > 0.5f) {
+        if ((light.shadow.w > 0.5f) || (darkness <= 0.0f)) {
+            return 1.0f;
+        }
 
-    const float3 rayTarget = light.posRadius.xyz + float3(0.0f, JFG_SHADOW_LIFT, 0.0f);
-    // Soft edges only for a light bright here (a dim one's soft edge doesn't show): one ray for the others.
-    const float radius = light.posRadius.w;
-    const float d = distance(light.posRadius.xyz, p);
-    const float inner = min(light.colorInner.w, radius - 1.0f);
-    const float strength = max(light.colorInner.r, max(light.colorInner.g, light.colorInner.b)) * saturate((radius - d) / max(radius - inner, 1.0f));
-    const float size = ((strength > 0.15f) || (jfgFrame[0].rays.w < 0.5f)) ? jfgFrame[0].rays.x : 0.0f;
-    return 1.0f - darkness * (1.0f - jfgRaySoft(p, n, rayTarget, max(light.shadow.y, 12.0f), size));
+        const float3 rayTarget = light.posRadius.xyz + float3(0.0f, JFG_SHADOW_LIFT, 0.0f);
+        // Soft edges only for a light bright here (a dim one's soft edge doesn't show): one ray for the others.
+        const float radius = light.posRadius.w;
+        const float d = distance(light.posRadius.xyz, p);
+        const float inner = min(light.colorInner.w, radius - 1.0f);
+        const float strength = max(light.colorInner.r, max(light.colorInner.g, light.colorInner.b)) * saturate((radius - d) / max(radius - inner, 1.0f));
+        const float size = ((strength > 0.15f) || (jfgFrame[0].rays.w < 0.5f)) ? jfgFrame[0].rays.x : 0.0f;
+        return 1.0f - darkness * jfgRayGraze(p, n, rayTarget) * (1.0f - jfgRaySoft(p, n, rayTarget, max(light.shadow.y, 12.0f), size));
+    }
 #endif
     const uint row = uint(light.shadow.x + 0.5f);
     if ((row == 0) || (darkness <= 0.0f)) {
@@ -237,9 +247,12 @@ float jfgSunVisibility(float3 p, float3 n, float darkness) {
     }
 
 #ifdef JFG_RAY_QUERY
-    // Ray-traced: towards the light, as far as its shadow map's depth range reaches.
-    const float sunReach = 2.0f * f.extra.y;
-    return 1.0f - darkness * (1.0f - jfgRaySoft(p, n, p + f.sunDir.xyz * sunReach, 0.0f, sunReach * tan(f.rays.y)));
+    // Ray-traced (characters.z): towards the light, as far as its shadow map's depth range reaches.
+    if (f.characters.z > 0.5f) {
+        const float sunReach = 2.0f * f.extra.y;
+        const float3 sunTarget = p + f.sunDir.xyz * sunReach;
+        return 1.0f - darkness * jfgRayGraze(p, n, sunTarget) * (1.0f - jfgRaySoft(p, n, sunTarget, 0.0f, sunReach * tan(f.rays.y)));
+    }
 #endif
 
     uint width, height;

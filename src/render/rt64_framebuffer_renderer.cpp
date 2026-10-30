@@ -86,7 +86,7 @@ std::atomic<int> rt64_jfg_pixel_lights{ 0 };   // the game's lights on the level
 std::atomic<int> rt64_jfg_debug_world{ 0 };    // show the world position as colour (RasterPS; F9 Lighting tab, RT64_JFG_DEBUG_WORLD)
 std::atomic<int> rt64_jfg_debug_shadow{ 0 };   // paint the casters' shadows red (RasterPS; F9 Lighting tab)
 std::atomic<int> rt64_jfg_debug_normal{ 0 };   // show the surface direction as colour (RasterPS; F9 Lighting tab)
-std::atomic<int> rt64_jfg_ray_shadows{ 0 };    // ray-traced shadows instead of the shadow maps, when the GPU can (recordJfgScene)
+std::atomic<int> rt64_jfg_ray_shadows{ 0 };    // ray tracing on, when the GPU can: the ray-traced ubershader and the scene's structure (recordJfgScene)
 std::atomic<int> rt64_jfg_unlit_objects{ 0 };  // objects the game draws unlit are lit like the level (RASTER_JFG_UNLIT)
 std::atomic<float> rt64_jfg_facing{ 0.0f };    // how much the level lighting depends on facing the light, 0-1 (RasterPS)
 std::atomic<float> rt64_jfg_shadows{ 0.0f };   // how dark characters' and objects' shadows from the lights are, 0-1 (RasterPS)
@@ -2792,6 +2792,7 @@ namespace RT64 {
         // JfgShadow.hlsli) out to the farthest point it lights. So that a light's shadows don't pop when another one
         // takes its map, each fades out as it gets as far as the next light in line (and the new one fades in).
         const float ShadowLift = 40.0f;
+        const float ShadowMinRadius = 120.0f;
         const size_t shadowed = (rt64_jfg_shadows.load(std::memory_order_relaxed) > 0.0f) ?
             size_t(std::clamp(rt64_jfg_shadow_lights.load(std::memory_order_relaxed), 0, int(JfgShadowRows))) : 0;
         auto distanceToCamera = [&](const interop::JfgLight &light) {
@@ -2808,6 +2809,12 @@ namespace RT64 {
             const bool noShadows = float(light.shadow.w) > 0.5f; // set by the lighting tool
             light.shadow = { 0.0f, 0.0f, 0.0f, noShadows ? 1.0f : 0.0f }; // w kept for ray-traced shadows
             if ((float(light.posRadius.w) <= 1.0f) || noShadows) {
+                continue;
+            }
+
+            // Lights too small to throw a shadow that shows (glows on characters and objects) don't take a map from
+            // the lights around them (they still cast ray-traced shadows).
+            if (float(light.posRadius.w) < ShadowMinRadius) {
                 continue;
             }
 
@@ -2865,7 +2872,7 @@ namespace RT64 {
         }
 
         frame.sunShadow = jfgSunShadow;
-        frame.characters = { params[17], params[18], 0.0f, rt64_jfg_highlight_amount.load(std::memory_order_relaxed) };
+        frame.characters = { params[17], params[18], params[37], rt64_jfg_highlight_amount.load(std::memory_order_relaxed) };
         frame.maps = { params[15], params[20], params[19], params[21] };
         static uint32_t jfgFrameNumber = 0;
         // rays.w: the ray-saving shortcuts on (RasterPS); RT64_JFG_RAY_NO_SAVINGS=1 turns them off, for comparing.
