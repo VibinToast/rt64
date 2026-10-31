@@ -158,6 +158,10 @@ namespace RT64 {
         void updateScreen();
         void destroyShaderCache();
         void updateMultisampling();
+        // Moves presentation to another window, or detaches it (an empty window) while there is none: an Android app's
+        // window is destroyed when it goes to the background and replaced when it comes back. Waits for the present
+        // thread, so a window being destroyed is no longer used once this returns.
+        bool setPresentWindow(RenderWindow window);
         void end();
         bool loadConfiguration();
         bool saveConfiguration();

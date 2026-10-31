@@ -553,6 +553,17 @@ namespace RT64 {
         rasterShaderCache->destroyAll();
     }
 
+    bool Application::setPresentWindow(RenderWindow window) {
+        std::unique_lock<std::mutex> threadLock(presentQueue->threadMutex);
+        presentGraphicsWorker->commandList->begin();
+        presentGraphicsWorker->commandList->end();
+        presentGraphicsWorker->execute();
+        presentGraphicsWorker->wait();
+        presentQueue->swapChainFramebuffers.clear();
+        appWindow->windowHandle = window;
+        return swapChain->setWindow(window);
+    }
+
     void Application::updateMultisampling() {
 #   if SAMPLE_LOCATIONS_REQUIRED
         // This operation does nothing if sample locations isn't supported.
