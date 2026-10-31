@@ -277,8 +277,9 @@ namespace RT64 {
             }
         }
 
-        // Create the framebuffers if necessary.
-        if (swapChainFramebuffers.empty()) {
+        // Create the framebuffers if necessary. Not after a failed resize: the swap chain's image views are gone then (the
+        // driver crashed creating framebuffers from them on Android when the app went to the background).
+        if (swapChainValid && swapChainFramebuffers.empty()) {
             uint32_t textureCount = ext.swapChain->getTextureCount();
             swapChainFramebuffers.resize(textureCount);
             for (uint32_t i = 0; i < textureCount; i++) {
