@@ -213,7 +213,11 @@ namespace RT64 {
         switch (resolutionMode) {
         case UserConfiguration::Resolution::WindowIntegerScale:
             if (ext.sharedResources->swapChainHeight > 0) {
+#           if defined(__ANDROID__)
+                resolutionMultiplier = std::max(float(ext.sharedResources->swapChainHeight / referenceHeight), 1.0f);
+#           else
                 resolutionMultiplier = std::max(float((ext.sharedResources->swapChainHeight + referenceHeight - 1) / referenceHeight), 1.0f);
+#           endif
             }
             else {
                 resolutionMultiplier = 1.0f;
