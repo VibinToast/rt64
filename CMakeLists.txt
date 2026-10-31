@@ -109,6 +109,9 @@ set(ANDROID_ABI arm64-v8a)
 
 # For DXC
 set (DXC_COMMON_OPTS "-I${PROJECT_SOURCE_DIR}/src")
+if (ANDROID)
+    list(APPEND DXC_COMMON_OPTS "-D" "RT64_TEXTURE_CACHE_SIZE=1024")
+endif()
 set (DXC_DXIL_OPTS "-Wno-ignored-attributes")
 set (DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
 set (DXC_LB_OPTS "${DXC_COMMON_OPTS}" "-D" "LIBRARY" "-T" "lib_6_3")

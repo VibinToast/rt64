@@ -314,18 +314,30 @@ namespace RT64 {
     };
 
     struct FramebufferRendererDescriptorTextureSet : RenderDescriptorSetBase {
+#if defined(__ANDROID__)
+        static const int UpperRange = 1024;
+#else
         static const int UpperRange = 8192;
+#endif
 
         uint32_t textureCacheSize = 0;
         uint32_t gTextures;
         uint32_t gTMEM;
 
         FramebufferRendererDescriptorTextureSet(RenderDevice *device = nullptr, uint32_t textureCacheSize = 0) {
+#if defined(__ANDROID__)
+            // The variable count can't exceed the declared range (and the shaders' RT64_TEXTURE_CACHE_SIZE).
+            if (textureCacheSize > UpperRange) {
+                fprintf(stderr, "Texture cache wants %u descriptors; Android build is limited to %d.\n", textureCacheSize, UpperRange);
+                textureCacheSize = UpperRange;
+            }
+#endif
             this->textureCacheSize = textureCacheSize;
 
             builder.begin();
             gTextures = builder.addTexture(0, UpperRange);
             gTMEM = gTextures;
+            // Boundless: update-after-bind and partially bound, which the texture cache relies on.
             builder.end(true, textureCacheSize);
 
             if (device != nullptr) {

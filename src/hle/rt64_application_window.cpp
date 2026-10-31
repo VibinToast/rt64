@@ -11,6 +11,7 @@
 #if defined(_WIN32)
 #   include <Windows.h>
 #   include <ShellScalingAPI.h>
+#elif defined(__ANDROID__)
 #elif defined(__linux__)
 #   define Status int
 #   if !defined(RT64_SDL_WINDOW_VULKAN)
@@ -22,6 +23,8 @@
 #endif
 
 #include "common/rt64_common.h"
+
+#include <SDL_syswm.h>
 
 namespace RT64 {
     // ApplicationWindow
@@ -104,7 +107,21 @@ namespace RT64 {
         bounds.width = rect.right - rect.left;
         bounds.height = rect.bottom - rect.top;
 #   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
+        if (SDL_VideoInit(nullptr) != 0) {
+            printf("Failed to init SDL2 video: %s\n", SDL_GetError());
+            assert(false && "Failed to init SDL2 video");
+            return;
+        }
+        SDL_DisplayMode dm;
+        if (SDL_GetCurrentDisplayMode(0, &dm) != 0) {
+            printf("Failed to get SDL2 current display mode: %s\n", SDL_GetError());
+            assert(false && "Failed to get SDL2 current display mode");
+            return;
+        }
+        bounds.left = 0;
+        bounds.top = 0;
+        bounds.width = dm.w;
+        bounds.height = dm.h;
 #   elif defined(__linux__) || defined(__APPLE__)
         if (SDL_VideoInit(nullptr) != 0) {
             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
@@ -136,6 +153,9 @@ namespace RT64 {
         # elif defined(RT64_SDL_WINDOW_VULKAN)
         flags |= SDL_WINDOW_VULKAN;
         #endif
+#       if defined(__ANDROID__)
+        flags |= SDL_WINDOW_FULLSCREEN;
+#       endif
         sdlWindow = SDL_CreateWindow(windowTitle, bounds.left, bounds.top, bounds.width, bounds.height, flags);
         assert((sdlWindow != nullptr) && "Failed to open window with SDL");
 
@@ -148,7 +168,8 @@ namespace RT64 {
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         windowHandle = sdlWindow;
 #   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
+        assert(wmInfo.subsystem == SDL_SYSWM_ANDROID);
+        windowHandle = wmInfo.info.android.window;
 #   elif defined(__linux__)
         windowHandle.display = wmInfo.info.x11.display;
         windowHandle.window = wmInfo.info.x11.window;
@@ -294,6 +315,14 @@ namespace RT64 {
         }
 
         refreshRate = displayMode.refresh_rate;
+#   elif defined(__ANDROID__)
+        SDL_DisplayMode displayMode = {};
+        if (SDL_GetCurrentDisplayMode(0, &displayMode) != 0) {
+            fprintf(stderr, "SDL_GetCurrentDisplayMode failed. Error: %s.\n", SDL_GetError());
+            return;
+        }
+
+        refreshRate = displayMode.refresh_rate;
 #   elif defined(__linux__)
         // Sourced from: https://stackoverflow.com/a/66865623
         XRRScreenResources *screenResources = XRRGetScreenResources(windowHandle.display, windowHandle.window);
@@ -349,6 +378,9 @@ namespace RT64 {
         newWindowTop = rect.top;
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         SDL_GetWindowPosition(windowHandle, &newWindowLeft, &newWindowTop);
+#   elif defined(__ANDROID__)
+        newWindowLeft = 0;
+        newWindowTop = 0;
 #   elif defined(__linux__)
         XWindowAttributes attributes;
         XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);
